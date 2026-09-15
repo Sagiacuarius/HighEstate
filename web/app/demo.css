@@ -49,10 +49,7 @@ body{
   border-right:1px solid var(--glass-border);
 }
 .brand{font-family:Fraunces,serif;font-size:21px;color:var(--slate-50);display:flex;align-items:center;gap:9px;padding:0 12px 25px}
-.brand-mark{
-  background:linear-gradient(135deg,var(--ember-200),var(--ember-600));
-  -webkit-background-clip:text;background-clip:text;color:transparent;font-size:18px;
-}
+.brand-logo{width:32px;height:32px;object-fit:contain;border-radius:6px}
 .workspace-switcher{
   display:flex;align-items:center;gap:10px;
   background:var(--glass);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);

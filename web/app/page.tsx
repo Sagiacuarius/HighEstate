@@ -279,7 +279,7 @@ export default function DashboardPage(): React.ReactElement {
   return (
     <div className="app-shell">
       <aside className="sidebar">
-        <div className="brand"><span className="brand-mark">✦</span><span>HighEstate</span></div>
+        <div className="brand"><img src="/logo.png" alt="HighEstate" width={32} height={32} className="brand-logo" /><span>HighEstate</span></div>
         <div className="account-switcher" aria-label="Selector de cuenta demo">
           {DEMO_ACCOUNTS.map((option) => (
             <button
