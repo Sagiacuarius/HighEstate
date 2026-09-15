@@ -18,7 +18,8 @@ Calendario real: entidad `calendar_events` (migración 006) con comandos atómic
 - `contracts/runtime-v1.ts` + `.test.ts` — `CalendarEventsResponse`/`AvailabilityResponse`/`CalendarCommandResponse` + parsers estrictos.
 - `web/app/demo-api.ts` — `calendarEvents`/`calendarAvailability`/`createCalendarEvent`/`updateCalendarEvent`/`cancelCalendarEvent`.
 - `web/runtime-client.ts` — helpers `put`/`delete` (body opcional en `call`).
-- `web/app/page.tsx` — vista "Calendario" + semana + crear/editar/cancelar.
+- `web/app/page.tsx` — vista "Calendario" (grilla mensual con crear inline por celda, editar y cancelar por chip).
+- `web/app/demo.css` — estilos de grilla (`calendar-grid`, `calendar-cell`, `calendar-chip`, inline form).
 - `api/test_calendar_wu13.py` — harness real.
 
 ## Decisiones implementadas
@@ -27,6 +28,7 @@ Calendario real: entidad `calendar_events` (migración 006) con comandos atómic
 - **Overlap half-open** `[starts_at, ends_at)`; crear/actualizar validan en transacción con `FOR UPDATE` (lost-update safe). Cancelados no ocupan.
 - **Zona horaria**: UTC en base; disponibilidad y UI en `BUSINESS_TIMEZONE` fijo (`America/Argentina/Buenos_Aires`). Migra a setting en WU15.
 - **Update**: solo `scheduled→completed` vía `status`; `cancelled` es terminal y no admite update (usar Cancel). Referencias opcionales con sentinel `_UNSET` (ausente = no cambia).
+- **UI en grilla mensual**: cada celda muestra sus eventos; "+" crea inline (título + horas, fecha fija a la celda); "×" en el chip cancela; clic en el chip edita (formulario para mover de fecha). Google Calendar sync queda como futuro (requiere `external_id`, no implementado).
 - **Idempotencia**: las tres operaciones reservan `(actor, operation, key)`; replay devuelve el resultado guardado sin efectos extra.
 - **Disponibilidad**: un query de eventos no-cancelados en rango + filtrado en memoria con `business_slot_starts` + `overlaps`; el harness la valida contra un oracle independiente.
 

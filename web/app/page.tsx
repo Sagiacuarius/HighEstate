@@ -256,34 +256,31 @@ export default function DashboardPage(): React.ReactElement {
     void loadAudit(api, next, false);
   };
 
-  // WU13: the calendar loads on demand (never cached server-side). Week view
-  // is UTC Monday–Sunday; datetime-local controls are treated as UTC like the
-  // audit filters. editingEventId null = creating; set = editing that event.
+  // WU13: the calendar renders a month grid (never cached server-side). Click a
+  // date cell "+" to create inline (title + times, date fixed to the cell);
+  // click an event chip to edit (full form below, for cross-date moves);
+  // click chip "×" to cancel. editingEventId null = no edit form.
   const [calendar, setCalendar] = React.useState<import("../../contracts/runtime-v1").CalendarEventsResponse | null>(null);
   const [calendarError, setCalendarError] = React.useState<string | null>(null);
   const [calendarLoading, setCalendarLoading] = React.useState(false);
-  const [calendarWeekOffset, setCalendarWeekOffset] = React.useState(0);
+  const [calendarMonthOffset, setCalendarMonthOffset] = React.useState(0);
+  const [creatingDate, setCreatingDate] = React.useState<string | null>(null);
   const [editingEventId, setEditingEventId] = React.useState<string | null>(null);
   const [calendarNote, setCalendarNote] = React.useState<string | null>(null);
 
-  const calendarWeekRange = React.useCallback((offsetWeeks: number): { from: string; to: string } => {
+  const calendarMonthRange = React.useCallback((offsetMonths: number): { from: string; to: string; year: number; month: number } => {
     const now = new Date();
-    const monday = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
-    const dow = (monday.getUTCDay() + 6) % 7; // Monday=0
-    monday.setUTCDate(monday.getUTCDate() - dow + offsetWeeks * 7);
-    monday.setUTCHours(0, 0, 0, 0);
-    const sunday = new Date(monday);
-    sunday.setUTCDate(sunday.getUTCDate() + 6);
-    sunday.setUTCHours(23, 59, 59, 0);
-    return { from: monday.toISOString(), to: sunday.toISOString() };
+    const first = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + offsetMonths, 1, 0, 0, 0, 0));
+    const last = new Date(Date.UTC(first.getUTCFullYear(), first.getUTCMonth() + 1, 0, 23, 59, 59, 0));
+    return { from: first.toISOString(), to: last.toISOString(), year: first.getUTCFullYear(), month: first.getUTCMonth() };
   }, []);
 
   const loadCalendar = React.useCallback(
-    async (client: DemoApi, offsetWeeks: number): Promise<void> => {
+    async (client: DemoApi, offsetMonths: number): Promise<void> => {
       setCalendarLoading(true);
       setCalendarError(null);
       try {
-        const { from, to } = calendarWeekRange(offsetWeeks);
+        const { from, to } = calendarMonthRange(offsetMonths);
         const page = await client.calendarEvents(from, to, false);
         setCalendar(page);
       } catch (error) {
@@ -295,47 +292,93 @@ export default function DashboardPage(): React.ReactElement {
         setCalendarLoading(false);
       }
     },
-    [calendarWeekRange],
+    [calendarMonthRange],
   );
 
   React.useEffect(() => {
     if (!api) return;
     setCalendar(null);
-    void loadCalendar(api, calendarWeekOffset);
-  }, [api, account?.client_account_id, calendarWeekOffset, loadCalendar]);
+    void loadCalendar(api, calendarMonthOffset);
+  }, [api, account?.client_account_id, calendarMonthOffset, loadCalendar]);
 
-  const submitCalendarForm = async (event: React.FormEvent<HTMLFormElement>): Promise<void> => {
+  // Cells for the month grid: leading Monday through trailing Sunday (UTC).
+  const calendarCells = React.useMemo((): Array<{ dateKey: string; dayNum: number; inMonth: boolean; isToday: boolean }> => {
+    const { year, month } = calendarMonthRange(calendarMonthOffset);
+    const first = new Date(Date.UTC(year, month, 1));
+    const lead = (first.getUTCDay() + 6) % 7; // Monday=0
+    const start = new Date(first);
+    start.setUTCDate(start.getUTCDate() - lead);
+    const todayKey = new Date().toISOString().slice(0, 10);
+    const cells: Array<{ dateKey: string; dayNum: number; inMonth: boolean; isToday: boolean }> = [];
+    for (let i = 0; i < 42; i++) {
+      const d = new Date(start);
+      d.setUTCDate(d.getUTCDate() + i);
+      const key = d.toISOString().slice(0, 10);
+      cells.push({ dateKey: key, dayNum: d.getUTCDate(), inMonth: d.getUTCMonth() === month, isToday: key === todayKey });
+      if (i >= 27 && d.getUTCDay() === 0 && d.getUTCMonth() !== month) break;
+    }
+    return cells;
+  }, [calendarMonthOffset, calendarMonthRange]);
+
+  const eventsForDate = React.useCallback((dateKey: string) => {
+    if (!calendar) return [];
+    return calendar.items.filter((e) => e.starts_at.slice(0, 10) === dateKey);
+  }, [calendar]);
+
+  const submitInlineCreate = async (event: React.FormEvent<HTMLFormElement>, dateKey: string): Promise<void> => {
     event.preventDefault();
     if (!api) return;
     const form = new FormData(event.currentTarget);
     const title = String(form.get("title") ?? "").trim();
-    const startsRaw = String(form.get("starts_at") ?? "").trim();
-    const endsRaw = String(form.get("ends_at") ?? "").trim();
-    const toUtcIso = (raw: string): string =>
-      /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(raw) ? `${raw}:00Z` : raw;
-    const bodyBase = {
-      title,
-      startsAt: toUtcIso(startsRaw),
-      endsAt: toUtcIso(endsRaw),
-      description: String(form.get("description") ?? "").trim() || undefined,
-      contactId: String(form.get("contact_id") ?? "").trim() || undefined,
-      leadId: String(form.get("lead_id") ?? "").trim() || undefined,
-      propertyId: String(form.get("property_id") ?? "").trim() || undefined,
-      notes: String(form.get("notes") ?? "").trim() || undefined,
-      idempotencyKey: `ui-calendar-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    const startTime = String(form.get("start_time") ?? "09:00").trim();
+    const endTime = String(form.get("end_time") ?? "10:00").trim();
+    setCalendarNote(null);
+    try {
+      const result = await api.createCalendarEvent({
+        title,
+        startsAt: `${dateKey}T${startTime}:00Z`,
+        endsAt: `${dateKey}T${endTime}:00Z`,
+        idempotencyKey: `ui-calendar-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      });
+      setCalendarNote(result.replayed ? "Evento creado (repetición)" : "Evento creado");
+      setCreatingDate(null);
+      await loadCalendar(api, calendarMonthOffset);
+    } catch (error) {
+      const correlation = error instanceof RuntimeHttpError
+        ? ` · ${error.envelope.error.correlation_id}` : "";
+      setCalendarError(`${errorText(error)}${correlation}`);
+    }
+  };
+
+  const submitCalendarForm = async (event: React.FormEvent<HTMLFormElement>): Promise<void> => {
+    event.preventDefault();
+    if (!api || !editingEventId) return;
+    const form = new FormData(event.currentTarget);
+    const text = (name: string): string | undefined => {
+      const v = String(form.get(name) ?? "").trim();
+      return v ? v : undefined;
+    };
+    const toUtcIso = (raw: string | undefined): string | undefined => {
+      if (!raw) return undefined;
+      return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(raw) ? `${raw}:00Z` : raw;
     };
     setCalendarNote(null);
     try {
-      if (editingEventId) {
-        const result = await api.updateCalendarEvent(editingEventId, bodyBase);
-        setCalendarNote(result.replayed ? "Evento actualizado (repetición)" : "Evento actualizado");
-      } else {
-        const result = await api.createCalendarEvent(bodyBase);
-        setCalendarNote(result.replayed ? "Evento creado (repetición)" : "Evento creado");
-      }
+      const result = await api.updateCalendarEvent(editingEventId, {
+        title: text("title"),
+        startsAt: toUtcIso(text("starts_at")),
+        endsAt: toUtcIso(text("ends_at")),
+        description: text("description"),
+        contactId: text("contact_id"),
+        leadId: text("lead_id"),
+        propertyId: text("property_id"),
+        notes: text("notes"),
+        idempotencyKey: `ui-calendar-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      });
+      setCalendarNote(result.replayed ? "Evento actualizado (repetición)" : "Evento actualizado");
       setEditingEventId(null);
       event.currentTarget.reset();
-      await loadCalendar(api, calendarWeekOffset);
+      await loadCalendar(api, calendarMonthOffset);
     } catch (error) {
       const correlation = error instanceof RuntimeHttpError
         ? ` · ${error.envelope.error.correlation_id}` : "";
@@ -349,7 +392,7 @@ export default function DashboardPage(): React.ReactElement {
     try {
       const result = await api.cancelCalendarEvent(eventId, `ui-calendar-cancel-${Date.now()}`);
       setCalendarNote(result.replayed ? "Evento cancelado (repetición)" : "Evento cancelado");
-      await loadCalendar(api, calendarWeekOffset);
+      await loadCalendar(api, calendarMonthOffset);
     } catch (error) {
       const correlation = error instanceof RuntimeHttpError
         ? ` · ${error.envelope.error.correlation_id}` : "";
@@ -780,16 +823,20 @@ export default function DashboardPage(): React.ReactElement {
           <section className={`view-section${view === "calendario" ? " is-visible" : ""}`}>
             <section className="panel">
               <div className="panel-heading">
-                <div><p className="eyebrow">Visitas · lectura y gestión manual</p><h2>Calendario · {calendar ? `${calendar.count} eventos` : "…"}</h2></div>
+                <div><p className="eyebrow">Visitas · tocá una fecha para crear, × para cancelar</p><h2>Calendario · {(() => {
+                  const { year, month } = calendarMonthRange(calendarMonthOffset);
+                  const months = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"];
+                  return `${months[month]} ${year}`;
+                })()} · {calendar ? `${calendar.count} eventos` : "…"}</h2></div>
                 <p className="empty-note">Rutas <code>GET /v1/demo/calendar/events</code> y <code>/availability</code>; el alcance lo deriva el servidor.</p>
               </div>
               <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
                 <button className="ghost-btn" disabled={calendarLoading}
-                        onClick={() => setCalendarWeekOffset((o) => o - 1)}>← Semana anterior</button>
-                <button className="ghost-btn" disabled={calendarLoading || calendarWeekOffset === 0}
-                        onClick={() => setCalendarWeekOffset(0)}>Hoy</button>
+                        onClick={() => setCalendarMonthOffset((o) => o - 1)}>← Mes anterior</button>
+                <button className="ghost-btn" disabled={calendarLoading || calendarMonthOffset === 0}
+                        onClick={() => setCalendarMonthOffset(0)}>Hoy</button>
                 <button className="ghost-btn" disabled={calendarLoading}
-                        onClick={() => setCalendarWeekOffset((o) => o + 1)}>Semana siguiente →</button>
+                        onClick={() => setCalendarMonthOffset((o) => o + 1)}>Mes siguiente →</button>
               </div>
               {calendarError ? (
                 <p className="empty-note"><code>{calendarError}</code></p>
@@ -797,50 +844,65 @@ export default function DashboardPage(): React.ReactElement {
               {calendarNote ? (
                 <p className="empty-note">{calendarNote}</p>
               ) : null}
-              {calendar && calendar.items.length === 0 && !calendarLoading ? (
-                <p className="empty-note">Sin eventos esta semana. Creá el primero abajo.</p>
-              ) : null}
-              {calendar && calendar.items.length > 0 ? (
-                <table className="data-table">
-                  <thead><tr><th>Evento</th><th>Inicio (UTC)</th><th>Fin (UTC)</th><th>Estado</th><th>Origen</th><th>Acciones</th></tr></thead>
-                  <tbody>
-                    {calendar.items.map((row) => (
-                      <tr key={row.event_id}>
-                        <td><strong>{row.title}</strong>{row.description ? <><br /><span>{row.description}</span></> : null}</td>
-                        <td>{formatDayUtc(row.starts_at)} {formatTimeUtc(row.starts_at)}</td>
-                        <td>{formatDayUtc(row.ends_at)} {formatTimeUtc(row.ends_at)}</td>
-                        <td><span className={pillFor(row.status)}>{statusLabel(row.status)}</span></td>
-                        <td><span className="mono">{row.source}</span></td>
-                        <td>
-                          <div style={{ display: "flex", gap: 8 }}>
-                            <button className="ghost-btn" disabled={calendarLoading || row.status !== "scheduled"}
-                                    onClick={() => setEditingEventId(row.event_id)}>Editar</button>
-                            <button className="ghost-btn danger" disabled={calendarLoading || row.status !== "scheduled"}
-                                    onClick={() => void cancelCalendarEvent(row.event_id)}>Cancelar</button>
-                          </div>
-                        </td>
-                      </tr>
+              <div className="calendar-grid" aria-label="Calendario mensual">
+                {["lun", "mar", "mié", "jue", "vie", "sáb", "dom"].map((d) => (
+                  <div className="calendar-dow" key={d}>{d}</div>
+                ))}
+                {calendarCells.map((cell) => (
+                  <div key={cell.dateKey}
+                       className={`calendar-cell${cell.inMonth ? "" : " is-other-month"}${cell.isToday ? " is-today" : ""}`}>
+                    <div className="calendar-day-row">
+                      <span className="calendar-day-num">{cell.dayNum}</span>
+                      <button className="calendar-add" title={`Crear evento el ${cell.dateKey}`}
+                              disabled={calendarLoading}
+                              onClick={() => { setCreatingDate(cell.dateKey); setEditingEventId(null); }}>+</button>
+                    </div>
+                    {eventsForDate(cell.dateKey).map((row) => (
+                      <button key={row.event_id}
+                              className={`calendar-chip${row.status !== "scheduled" ? " is-cancelled" : ""}`}
+                              title={`${row.title} · ${formatTimeUtc(row.starts_at)}–${formatTimeUtc(row.ends_at)} UTC · clic para editar`}
+                              disabled={calendarLoading || row.status !== "scheduled"}
+                              onClick={() => setEditingEventId(row.event_id)}>
+                        <span className="calendar-chip-title">{row.title}</span>
+                        <span className="calendar-chip-time">{formatTimeUtc(row.starts_at)}</span>
+                        <span className="calendar-del" role="button" aria-label={`Cancelar ${row.title}`}
+                              onClick={(e) => { e.stopPropagation(); void cancelCalendarEvent(row.event_id); }}>×</span>
+                      </button>
                     ))}
-                  </tbody>
-                </table>
-              ) : null}
-              <form className="audit-filters" onSubmit={(e) => void submitCalendarForm(e)} aria-label={editingEventId ? "Editar evento" : "Crear evento"}>
-                <label>Título<input name="title" required maxLength={200} placeholder="Visita · Palermo" /></label>
-                <label>Inicio<input name="starts_at" type="datetime-local" required /></label>
-                <label>Fin<input name="ends_at" type="datetime-local" required /></label>
-                <label>Contacto<input name="contact_id" placeholder="uuid (opcional)" /></label>
-                <label>Propiedad<input name="property_id" placeholder="uuid (opcional)" /></label>
-                <label>Notas<input name="notes" placeholder="opcional" /></label>
-                <button className="ghost-btn" type="submit" disabled={calendarLoading}>
-                  {editingEventId ? "Guardar cambios" : "Crear evento"}
-                </button>
-                {editingEventId ? (
-                  <button className="ghost-btn" type="button" disabled={calendarLoading}
-                          onClick={() => setEditingEventId(null)}>Dejar de editar</button>
-                ) : null}
-              </form>
+                    {creatingDate === cell.dateKey ? (
+                      <form className="calendar-inline-form"
+                            onSubmit={(e) => void submitInlineCreate(e, cell.dateKey)}
+                            aria-label={`Crear evento el ${cell.dateKey}`}>
+                        <input name="title" required maxLength={200} placeholder="Título · ej. Visita Palermo" autoFocus />
+                        <div className="calendar-inline-row">
+                          <input name="start_time" type="time" defaultValue="09:00" required aria-label="Hora de inicio" />
+                          <input name="end_time" type="time" defaultValue="10:00" required aria-label="Hora de fin" />
+                        </div>
+                        <div className="calendar-inline-row">
+                          <button className="ghost-btn" type="submit" disabled={calendarLoading}>Crear</button>
+                          <button className="ghost-btn" type="button" disabled={calendarLoading}
+                                  onClick={() => setCreatingDate(null)}>✕</button>
+                        </div>
+                      </form>
+                    ) : null}
+                  </div>
+                ))}
+              </div>
               {editingEventId ? (
-                <p className="empty-note">Editando <code>{editingEventId.slice(0, 8)}…</code> — los campos vacíos no cambian; para limpiar un opcional se usa la API.</p>
+                <>
+                  <form className="audit-filters" onSubmit={(e) => void submitCalendarForm(e)} aria-label="Editar evento (mover de fecha)">
+                    <label>Título<input name="title" maxLength={200} placeholder="(sin cambios)" /></label>
+                    <label>Inicio<input name="starts_at" type="datetime-local" /></label>
+                    <label>Fin<input name="ends_at" type="datetime-local" /></label>
+                    <label>Contacto<input name="contact_id" placeholder="uuid (opcional)" /></label>
+                    <label>Propiedad<input name="property_id" placeholder="uuid (opcional)" /></label>
+                    <label>Notas<input name="notes" placeholder="opcional" /></label>
+                    <button className="ghost-btn" type="submit" disabled={calendarLoading}>Guardar cambios</button>
+                    <button className="ghost-btn" type="button" disabled={calendarLoading}
+                            onClick={() => setEditingEventId(null)}>Dejar de editar</button>
+                  </form>
+                  <p className="empty-note">Editando <code>{editingEventId.slice(0, 8)}…</code> — para mover de fecha usá Inicio/Fin; los vacíos no cambian.</p>
+                </>
               ) : null}
             </section>
           </section>

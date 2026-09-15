@@ -417,3 +417,25 @@ body{
 .audit-filters{display:flex;flex-wrap:wrap;gap:10px 14px;align-items:flex-end;margin:8px 0 14px}
 .audit-filters label{display:flex;flex-direction:column;gap:4px;color:var(--slate-400);font-size:12px}
 .audit-filters input{background:rgba(10,24,38,.5);border:1px solid rgba(148,178,208,.25);border-radius:8px;color:var(--slate-50);font:13px 'IBM Plex Mono',monospace;padding:7px 9px;min-width:150px}
+
+/* --- WU13 calendar grid: month view with inline per-cell create/delete. --- */
+.calendar-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:6px;margin:8px 0 14px}
+.calendar-dow{font:10px 'IBM Plex Mono',monospace;text-transform:uppercase;letter-spacing:.1em;color:var(--slate-400);text-align:center;padding:6px 0}
+.calendar-cell{min-height:96px;border:1px solid var(--glass-border);border-radius:10px;padding:6px;background:rgba(10,24,38,.35);display:flex;flex-direction:column;gap:4px}
+.calendar-cell.is-other-month{opacity:.38}
+.calendar-cell.is-today{border-color:var(--glass-border-strong)}
+.calendar-day-row{display:flex;align-items:center;justify-content:space-between}
+.calendar-day-num{font:13px 'IBM Plex Mono',monospace;color:var(--slate-200)}
+.calendar-add{border:1px solid var(--glass-border);background:transparent;color:var(--slate-400);border-radius:6px;font-size:13px;line-height:1;padding:2px 7px;cursor:pointer}
+.calendar-add:hover{color:var(--slate-50);border-color:var(--glass-border-strong)}
+.calendar-chip{display:flex;align-items:center;justify-content:space-between;gap:4px;background:rgba(46,78,114,.45);border-radius:6px;padding:3px 6px;font-size:12px;color:var(--navy-100);cursor:pointer;text-align:left;border:0;width:100%}
+.calendar-chip:hover{background:rgba(46,78,114,.65)}
+.calendar-chip.is-cancelled{opacity:.5;text-decoration:line-through}
+.calendar-chip-title{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.calendar-chip-time{font:10px 'IBM Plex Mono',monospace;color:var(--slate-400);flex:none}
+.calendar-del{border:0;background:transparent;color:var(--slate-400);font-size:13px;line-height:1;padding:0 2px;cursor:pointer;flex:none}
+.calendar-del:hover{color:var(--ember-100)}
+.calendar-inline-form{display:flex;flex-direction:column;gap:4px}
+.calendar-inline-form input{background:rgba(10,24,38,.6);border:1px solid rgba(148,178,208,.3);border-radius:6px;color:var(--slate-50);font-size:12px;padding:5px 6px;width:100%}
+.calendar-inline-row{display:flex;gap:4px}
+.calendar-inline-row button{flex:1}
