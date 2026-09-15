@@ -28,6 +28,7 @@ venv/
 
 # --- Logs y artefactos de test ---
 *.log
+regr_*.txt
 
 # --- OS / editor ---
 .DS_Store
