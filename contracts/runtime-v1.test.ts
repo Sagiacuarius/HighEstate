@@ -6,6 +6,7 @@ import {
   idempotencyKey,
   makeCorrelationId,
   optionalIdempotencyKey,
+  parseCrmAuditResponse,
   parseErrorEnvelope,
   parseLivenessResponse,
   parseReadinessResponse,
@@ -69,5 +70,66 @@ describe("runtime v1 contracts", () => {
     expect(() =>
       parseReadinessResponse({ status: "ok", service: "x", contract_version: "v1", correlation_id: "c", dependencies: { db: "broken" } }),
     ).toThrow();
+  });
+});
+
+/* --- WU12 audit screen contract mirror --- */
+
+function auditPayload(itemOverrides: Record<string, unknown> = {},
+                      rootOverrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    account_id: "acct-1",
+    as_of: "2026-09-15T06:00:00.000000Z",
+    correlation_id: "corr-a",
+    items: [
+      {
+        audit_id: "8f000000-0000-0000-0000-000000000001",
+        action: "crm.property.create",
+        outcome: "success",
+        resource_type: "property",
+        resource_id: "6d100000-0000-0000-0000-0000000000a1",
+        actor_id: "10000000-0000-0000-0000-000000000001",
+        correlation_id: "corr-item",
+        idempotency_key: null,
+        reason: null,
+        created_at: "2026-09-15T06:00:00.000000Z",
+        ...itemOverrides,
+      },
+    ],
+    count: 1,
+    total: 1,
+    limit: 25,
+    has_more: false,
+    next_cursor: null,
+    filters: {
+      contact_id: null, property_id: null, user_id: null,
+      action: null, from: null, to: null,
+    },
+    ...rootOverrides,
+  };
+}
+
+describe("parseCrmAuditResponse (WU12)", () => {
+  it("accepts the server shape and preserves cursor fields", () => {
+    const parsed = parseCrmAuditResponse(auditPayload({},
+      { has_more: true, next_cursor: "eyJ4IjoxfQ" }));
+    expect(parsed.items[0].action).toBe("crm.property.create");
+    expect(parsed.has_more).toBe(true);
+    expect(parsed.next_cursor).toBe("eyJ4IjoxfQ");
+    expect(parsed.filters).toEqual(auditPayload().filters);
+  });
+
+  it("rejects an item carrying a metadata key — hard redaction failure", () => {
+    expect(() => parseCrmAuditResponse(auditPayload({ metadata: { reason: "x" } })))
+      .toThrow(/metadata must never be exposed/);
+  });
+
+  it("rejects unknown outcome enums and missing required fields", () => {
+    expect(() => parseCrmAuditResponse(auditPayload({ outcome: "succeeded" }))).toThrow();
+    expect(() => parseCrmAuditResponse(auditPayload({ outcome: null }))).toThrow();
+    expect(() => parseCrmAuditResponse(auditPayload({}, { items: undefined }))).toThrow();
+    expect(() => parseCrmAuditResponse(auditPayload({}, { has_more: "yes" }))).toThrow();
+    expect(() => parseCrmAuditResponse(auditPayload({}, { filters: undefined }))).toThrow();
+    expect(() => parseCrmAuditResponse(null)).toThrow();
   });
 });

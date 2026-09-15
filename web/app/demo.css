@@ -412,3 +412,8 @@ body{
 .simulator-panel .panel-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
 .simulate-btn{white-space:nowrap}
 .ghost-btn.danger{border-color:rgba(227,159,104,.65);color:var(--ember-100)}
+
+/* --- WU12 audit screen: filter bar (labels above compact inputs). --- */
+.audit-filters{display:flex;flex-wrap:wrap;gap:10px 14px;align-items:flex-end;margin:8px 0 14px}
+.audit-filters label{display:flex;flex-direction:column;gap:4px;color:var(--slate-400);font-size:12px}
+.audit-filters input{background:rgba(10,24,38,.5);border:1px solid rgba(148,178,208,.25);border-radius:8px;color:var(--slate-50);font:13px 'IBM Plex Mono',monospace;padding:7px 9px;min-width:150px}

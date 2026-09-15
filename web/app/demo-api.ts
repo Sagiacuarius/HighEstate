@@ -18,6 +18,7 @@ import {
 import {
   parseCrmActivityResponse,
   parseCrmAgendaResponse,
+  parseCrmAuditResponse,
   parseCrmDashboardResponse,
   parseCrmInboxResponse,
   parseCrmLeadsResponse,
@@ -29,6 +30,7 @@ import {
   parseDemoSimulateResponse,
   type CrmActivityResponse,
   type CrmAgendaResponse,
+  type CrmAuditResponse,
   type CrmDashboardResponse,
   type CrmInboxResponse,
   type CrmLeadsResponse,
@@ -62,6 +64,7 @@ export type DemoApi = {
   pipeline: (options?: RuntimeHttpCallOptions) => Promise<CrmPipelineResponse>;
   agenda: (options?: RuntimeHttpCallOptions) => Promise<CrmAgendaResponse>;
   activity: (options?: RuntimeHttpCallOptions) => Promise<CrmActivityResponse>;
+  audit: (filters: AuditFilterState, options?: RuntimeHttpCallOptions) => Promise<CrmAuditResponse>;
   seed: (options?: RuntimeHttpCallOptions) => Promise<DemoControlsResponse>;
   reset: (options?: RuntimeHttpCallOptions, clearEffects?: boolean) => Promise<DemoControlsResponse>;
   simulate: (body: { body?: string; receivedAt?: string; idempotencyKey?: string },
@@ -90,6 +93,8 @@ export function createDemoApi(baseUrl: string, fetcher?: DemoApiFetcher): DemoAp
     pipeline: (options) => runtime.get("/v1/demo/pipeline", options ?? {}, parseCrmPipelineResponse),
     agenda: (options) => runtime.get("/v1/demo/agenda", options ?? {}, parseCrmAgendaResponse),
     activity: (options) => runtime.get("/v1/demo/activity", options ?? {}, parseCrmActivityResponse),
+    audit: (filters, options) =>
+      runtime.get(`/v1/demo/audit${buildAuditQuery(filters)}`, options ?? {}, parseCrmAuditResponse),
     seed: (options) => runtime.post("/v1/demo/seed", {}, options ?? {}, parseDemoControlsResponse),
     reset: (options, clearEffects) =>
       runtime.post(
@@ -156,4 +161,38 @@ export function formatDayUtc(iso: string): string {
   const months = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"];
   const pad = (n: number): string => String(n).padStart(2, "0");
   return `${days[date.getUTCDay()]} ${pad(date.getUTCDate())} ${months[date.getUTCMonth()]}`;
+}
+
+/* --- WU12 audit screen helpers (pure, unit-tested) --- */
+
+/** Filter state of the Auditoría view; empty strings mean "no filter". */
+export type AuditFilterState = {
+  contact_id?: string;
+  property_id?: string;
+  user_id?: string;
+  action?: string;
+  from?: string;
+  to?: string;
+  limit?: number;
+  cursor?: string | null;
+};
+
+/**
+ * Querystring builder for GET /v1/demo/audit. Only the whitelisted filter
+ * keys are ever serialized — notably NEVER a client account id (scope is
+ * server-derived), and blank controls are omitted so the server default
+ * applies. Values are percent-encoded by URLSearchParams.
+ */
+export function buildAuditQuery(filters: AuditFilterState): string {
+  const params = new URLSearchParams();
+  const keys = ["contact_id", "property_id", "user_id", "action", "from", "to", "cursor"] as const;
+  for (const key of keys) {
+    const value = filters[key];
+    if (typeof value === "string" && value.trim()) params.set(key, value.trim());
+  }
+  if (typeof filters.limit === "number" && Number.isFinite(filters.limit)) {
+    params.set("limit", String(Math.trunc(filters.limit)));
+  }
+  const query = params.toString();
+  return query ? `?${query}` : "";
 }

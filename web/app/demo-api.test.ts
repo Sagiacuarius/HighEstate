@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 import {
   createDemoApi,
   resolveDemoApiBaseUrl,
+  buildAuditQuery,
   describeSimulateResult,
   formatDayUtc,
   formatMoney,
@@ -236,5 +237,36 @@ describe("view helpers", () => {
     expect(formatTimeUtc("2026-09-08T15:04:00.000Z")).toBe("15:04");
     expect(formatDayUtc("2026-09-08T15:04:00.000Z")).toBe("mar 08 sep");
     expect(formatTimeUtc("no-fecha")).toBe("no-fecha");
+  });
+});
+
+describe("buildAuditQuery (WU12)", () => {
+  it("serializes only the whitelisted filters, trimmed, percent-encoded", () => {
+    const qs = buildAuditQuery({
+      contact_id: " c1 ", property_id: "p1", action: "crm.inbound.process",
+      from: "2026-09-01T00:00:00Z", to: "2026-09-14T23:59:59Z", limit: 3,
+    });
+    const params = new URLSearchParams(qs.replace(/^\?/, ""));
+    expect(params.get("contact_id")).toBe("c1");
+    expect(params.get("property_id")).toBe("p1");
+    expect(params.get("action")).toBe("crm.inbound.process");
+    expect(params.get("from")).toBe("2026-09-01T00:00:00Z");
+    expect(params.get("to")).toBe("2026-09-14T23:59:59Z");
+    expect(params.get("limit")).toBe("3");
+    expect(params.get("user_id")).toBeNull();
+  });
+
+  it("never serializes an account id, and empty controls are omitted", () => {
+    // Claims that must never reach the querystring: blank filters plus two
+    // account-id-shaped keys smuggled into the filters object at runtime.
+    const smuggled = { contact_id: "", action: "   ", clientAccountId: "acct-1" };
+    const qs = buildAuditQuery(smuggled as Parameters<typeof buildAuditQuery>[0]);
+    expect(qs).toBe("");
+  });
+
+  it("carries cursor for load-more", () => {
+    const qs = buildAuditQuery({ limit: 1, cursor: "eyJhIjoxfQ" });
+    expect(qs).toContain("cursor=eyJhIjoxfQ");
+    expect(qs).toContain("limit=1");
   });
 });

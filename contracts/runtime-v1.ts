@@ -581,6 +581,96 @@ export function parseCrmActivityResponse(value: unknown): CrmActivityResponse {
 }
 
 /**
+ * Audit Screen WU12 — versioned response of GET /v1/demo/audit
+ * (mirror api/queries/audit_screen_wu12.py). Read-only exposure of the
+ * accepted audit_records trail with filters + keyset cursor. Items NEVER
+ * carry metadata: a parser-received item with that key is a hard failure,
+ * the client-side backstop of the server-side projection.
+ */
+export type CrmAuditOutcome = "success" | "denied" | "failure";
+
+export type CrmAuditItem = {
+  audit_id: string;
+  action: string;
+  outcome: CrmAuditOutcome;
+  resource_type: string;
+  resource_id: string | null;
+  actor_id: string | null;
+  correlation_id: string;
+  idempotency_key: string | null;
+  reason: string | null;
+  created_at: string;
+};
+
+export type CrmAuditFilters = {
+  contact_id: string | null;
+  property_id: string | null;
+  user_id: string | null;
+  action: string | null;
+  from: string | null;
+  to: string | null;
+};
+
+export type CrmAuditResponse = CrmReadMeta & {
+  items: CrmAuditItem[];
+  count: number;
+  total: number;
+  limit: number;
+  has_more: boolean;
+  next_cursor: string | null;
+  filters: CrmAuditFilters;
+};
+
+const AUDIT_OUTCOMES: readonly string[] = ["success", "denied", "failure"];
+
+function reqOutcome(value: unknown, label: string): CrmAuditOutcome {
+  if (typeof value !== "string" || !AUDIT_OUTCOMES.includes(value)) {
+    throw new Error(`Invalid ${label}`);
+  }
+  return value as CrmAuditOutcome;
+}
+
+export function parseCrmAuditResponse(value: unknown): CrmAuditResponse {
+  const meta = parseCrmReadMeta(value, "audit");
+  const record = value as Record<string, unknown>;
+  const items = reqArray(record.items, "audit.items").map((entry) => {
+    const item = reqRecord(entry, "audit item");
+    if ("metadata" in item) throw new Error("Invalid audit item: metadata must never be exposed");
+    return {
+      audit_id: reqStr(item, "audit_id", "audit audit_id"),
+      action: reqStr(item, "action", "audit action"),
+      outcome: reqOutcome(item.outcome, "audit outcome"),
+      resource_type: reqStr(item, "resource_type", "audit resource_type"),
+      resource_id: optStr(item, "resource_id", "audit resource_id"),
+      actor_id: optStr(item, "actor_id", "audit actor_id"),
+      correlation_id: reqStr(item, "correlation_id", "audit correlation_id"),
+      idempotency_key: optStr(item, "idempotency_key", "audit idempotency_key"),
+      reason: optStr(item, "reason", "audit reason"),
+      created_at: reqStr(item, "created_at", "audit created_at"),
+    };
+  });
+  const filtersRaw = reqRecord(record.filters, "audit.filters");
+  const filters: CrmAuditFilters = {
+    contact_id: optStr(filtersRaw, "contact_id", "audit.filters.contact_id"),
+    property_id: optStr(filtersRaw, "property_id", "audit.filters.property_id"),
+    user_id: optStr(filtersRaw, "user_id", "audit.filters.user_id"),
+    action: optStr(filtersRaw, "action", "audit.filters.action"),
+    from: optStr(filtersRaw, "from", "audit.filters.from"),
+    to: optStr(filtersRaw, "to", "audit.filters.to"),
+  };
+  return {
+    ...meta,
+    items,
+    count: reqNum(record, "count", "audit.count"),
+    total: reqNum(record, "total", "audit.total"),
+    limit: reqNum(record, "limit", "audit.limit"),
+    has_more: reqBool(record, "has_more", "audit.has_more"),
+    next_cursor: optStr(record, "next_cursor", "audit.next_cursor"),
+    filters,
+  };
+}
+
+/**
  * MVP Commercial Demo WU7 — server-owned demo selector shapes
  * (mirror api/identity/demo_identity.py + api/composition_wu7_mvp.py).
  * requestedAccountId is an intent/hint only; the server resolves membership

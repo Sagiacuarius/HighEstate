@@ -19,6 +19,7 @@ import {
   initials,
   isResetBlockedError,
   unreadTotal,
+  type AuditFilterState,
   type DemoApi,
 } from "./demo-api";
 import { RuntimeHttpError } from "../runtime-client";
@@ -29,7 +30,7 @@ import type {
 
 export const dynamic = "force-dynamic";
 
-type ViewKey = "resumen" | "inbox" | "leads" | "properties" | "pipeline" | "agenda" | "activity";
+type ViewKey = "resumen" | "inbox" | "leads" | "properties" | "pipeline" | "agenda" | "activity" | "auditoria";
 
 type ViewData = {
   dashboard?: import("../../contracts/runtime-v1").CrmDashboardResponse;
@@ -81,8 +82,19 @@ const STATUS_LABELS: Record<string, string> = {
   success: "éxito",
   denied: "denegado",
   failure: "fallo",
+  // WU11 (property-catalog): estados del catálogo y acciones del audit.
+  capturing: "En captura",
+  sold: "Vendido",
+  rented: "Alquilado",
+  paused: "Pausado",
+  "crm.property.create": "Propiedad creada",
+  "crm.property.update": "Propiedad actualizada",
+  "crm.property.status_change": "Cambio de estado de propiedad",
+  "crm.property.link_contact": "Contacto vinculado a propiedad",
+  "crm.property.register_interest": "Interés registrado",
   "crm.inbound.process": "Mensaje entrante procesado",
   "crm.lead.transition": "Prospecto avanzado de etapa",
+  "crm.follow_up.create": "Seguimiento creado",
   "crm.follow_up.complete": "Seguimiento completado",
   authorization_denied: "Acceso denegado",
 };
@@ -99,6 +111,7 @@ const VIEW_LABELS: Record<ViewKey, string> = {
   pipeline: "Embudo",
   agenda: "Agenda",
   activity: "Actividad",
+  auditoria: "Auditoría",
 };
 
 function errorText(error: unknown): string {
@@ -128,6 +141,11 @@ export default function DashboardPage(): React.ReactElement {
   const [simulating, setSimulating] = React.useState(false);
   const [simulateNote, setSimulateNote] = React.useState<string | null>(null);
   const [resetBlocked, setResetBlocked] = React.useState(false);
+  // WU12 audit screen: own state (filters + keyset paging), never fixture data.
+  const [audit, setAudit] = React.useState<import("../../contracts/runtime-v1").CrmAuditResponse | null>(null);
+  const [auditError, setAuditError] = React.useState<string | null>(null);
+  const [auditFilters, setAuditFilters] = React.useState<AuditFilterState>({});
+  const [auditLoading, setAuditLoading] = React.useState(false);
 
   const reload = React.useCallback(
     async (client: DemoApi) => {
@@ -175,6 +193,62 @@ export default function DashboardPage(): React.ReactElement {
       }
     })();
   }, [api, reload]);
+
+  // WU12: the audit screen loads on demand (never cached server-side, own
+  // filter/cursor state). append=true continues the keyset via next_cursor.
+  const loadAudit = React.useCallback(
+    async (client: DemoApi, filters: AuditFilterState, append: boolean): Promise<void> => {
+      setAuditLoading(true);
+      setAuditError(null);
+      try {
+        const page = await client.audit(filters);
+        setAudit((previous) => (append && previous
+          ? { ...page, items: [...previous.items, ...page.items], count: previous.count + page.count }
+          : page));
+      } catch (error) {
+        // Envelope discipline: the operator must see the correlation id to
+        // cross-check against the X-Correlation-Id header (acceptance gate).
+        const correlation = error instanceof RuntimeHttpError
+          ? ` · ${error.envelope.error.correlation_id}` : "";
+        setAuditError(`${errorText(error)}${correlation}`);
+        if (!append) setAudit(null);
+      } finally {
+        setAuditLoading(false);
+      }
+    },
+    [],
+  );
+
+  React.useEffect(() => {
+    if (!api) return;
+    setAudit(null);
+    void loadAudit(api, {}, false);
+  }, [api, account?.client_account_id, loadAudit]);
+
+  const applyAuditFilters = (event: React.FormEvent<HTMLFormElement>): void => {
+    event.preventDefault();
+    if (!api) return;
+    const form = new FormData(event.currentTarget);
+    const next: AuditFilterState = {};
+    for (const key of ["contact_id", "property_id", "user_id", "action"] as const) {
+      const value = String(form.get(key) ?? "").trim();
+      if (value) next[key] = value;
+    }
+    // datetime-local yields "YYYY-MM-DDTHH:MM" (no offset); the server demands
+    // an ISO-8601 value with timezone. Treat the control's naive time as UTC.
+    const fromRaw = String(form.get("from") ?? "").trim();
+    if (fromRaw) {
+      next.from = /^\d{4}-\d{2}-\d{2}$/.test(fromRaw) ? `${fromRaw}T00:00:00Z`
+        : /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(fromRaw) ? `${fromRaw}:00Z` : fromRaw;
+    }
+    const toRaw = String(form.get("to") ?? "").trim();
+    if (toRaw) {
+      next.to = /^\d{4}-\d{2}-\d{2}$/.test(toRaw) ? `${toRaw}T23:59:59Z`
+        : /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(toRaw) ? `${toRaw}:00Z` : toRaw;
+    }
+    setAuditFilters(next);
+    void loadAudit(api, next, false);
+  };
 
   const switchAccount = async (requestedAccountId: string): Promise<void> => {
     if (!api || switching) return;
@@ -305,6 +379,7 @@ export default function DashboardPage(): React.ReactElement {
           {navItem("pipeline", "▥", "Embudo")}
           {navItem("agenda", "◷", "Agenda", pending)}
           {navItem("activity", "↗", "Actividad")}
+          {navItem("auditoria", "⌕", "Auditoría")}
         </nav>
         <div className="sidebar-bottom">
           <div className="profile">
@@ -540,6 +615,59 @@ export default function DashboardPage(): React.ReactElement {
                 </table>
               </section>
             ) : null}
+          </section>
+          <section className={`view-section${view === "auditoria" ? " is-visible" : ""}`}>
+            <section className="panel">
+              <div className="panel-heading">
+                <div><p className="eyebrow">Evidencia · solo lectura</p><h2>Auditoría · {audit ? audit.total : "…"}</h2></div>
+                <p className="empty-note">Ruta leída <code>GET /v1/demo/audit</code>; sin filtros por cuenta: el alcance lo deriva el servidor.</p>
+              </div>
+              <form className="audit-filters" onSubmit={applyAuditFilters} aria-label="Filtros de auditoría">
+                <label>Contacto<input name="contact_id" defaultValue={auditFilters.contact_id ?? ""} placeholder="uuid" /></label>
+                <label>Propiedad<input name="property_id" defaultValue={auditFilters.property_id ?? ""} placeholder="uuid" /></label>
+                <label>Usuario<input name="user_id" defaultValue={auditFilters.user_id ?? ""} placeholder="uuid (actor)" /></label>
+                <label>Acción<input name="action" defaultValue={auditFilters.action ?? ""} placeholder="crm.property.create" /></label>
+                <label>Desde<input name="from" type="datetime-local" defaultValue={auditFilters.from ?? ""} /></label>
+                <label>Hasta<input name="to" type="datetime-local" defaultValue={auditFilters.to ?? ""} /></label>
+                <button className="ghost-btn" type="submit" disabled={auditLoading}>Filtrar</button>
+              </form>
+              {auditError ? (
+                <p className="empty-note"><code>{auditError}</code></p>
+              ) : null}
+              {audit && audit.items.length === 0 && !auditLoading ? (
+                <p className="empty-note">Sin registros de auditoría para este filtro.</p>
+              ) : null}
+              {audit && audit.items.length > 0 ? (
+                <>
+                  <table className="data-table">
+                    <thead><tr><th>Acción</th><th>Resultado</th><th>Recurso</th><th>Actor</th><th>Hora</th><th>Correlación</th></tr></thead>
+                    <tbody>
+                      {audit.items.map((row) => (
+                        <tr key={row.audit_id}>
+                          <td><strong>{statusLabel(row.action)}</strong>{row.reason ? <><br /><span className="mono">{row.reason}</span></> : null}</td>
+                          <td><span className={pillFor(row.outcome)}>{statusLabel(row.outcome)}</span></td>
+                          <td><span className="mono">{row.resource_type}{row.resource_id ? ` · ${row.resource_id.slice(0, 8)}…` : ""}</span></td>
+                          <td><span className="mono">{row.actor_id ? row.actor_id.slice(0, 8) + "…" : "—"}</span></td>
+                          <td>{formatDayUtc(row.created_at)} {formatTimeUtc(row.created_at)}</td>
+                          <td><span className="mono">{row.correlation_id}</span></td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+                    {audit.has_more && audit.next_cursor ? (
+                      <button className="ghost-btn" disabled={auditLoading}
+                              onClick={() => void loadAudit(api!, { ...auditFilters, cursor: audit.next_cursor }, true)}>
+                        {auditLoading ? "Cargando…" : "Cargar más"}
+                      </button>
+                    ) : null}
+                  </div>
+                </>
+              ) : null}
+              {audit && !auditError ? (
+                <p className="empty-note">Página {audit.count} de {audit.total} · límite {audit.limit} · datos al {formatTimeUtc(audit.as_of)} UTC</p>
+              ) : null}
+            </section>
           </section>
         </section>
       </main>

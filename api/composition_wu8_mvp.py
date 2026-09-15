@@ -46,6 +46,7 @@ from api.queries.crm_reads import (
     CrmReadValidation,
 )
 from api.queries.demo_cache import ScopedQueryCache, build_scoped_key
+from api.routes.audit_screen_wu12 import build_audit_screen_router
 from api.routes.simulator_wu9 import (
     build_simulator_router,
     clear_simulator_effects,
@@ -346,6 +347,11 @@ def create_mvp_dashboard_app(
     # its route appears in the OpenAPI docs under /v1/demo/simulate).
     app.include_router(build_simulator_router(composition.conn_kwargs),
                        prefix=DEMO_PREFIX, tags=["dev-only-simulator"])
+
+    # WU12: read-only audit screen over the accepted trail (same mount
+    # precedent; the accepted /v1/demo/activity route above is untouched).
+    app.include_router(build_audit_screen_router(composition.conn_kwargs),
+                       prefix=DEMO_PREFIX, tags=["audit-screen"])
 
     @app.exception_handler(404)
     async def not_found(request: Request, exc):
