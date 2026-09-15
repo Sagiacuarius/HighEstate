@@ -95,7 +95,7 @@ export class RuntimeHttpClient {
     path: string,
     options: RuntimeHttpCallOptions,
     parse: (value: unknown) => T & { correlation_id: string },
-    init?: { method: string; body: string },
+    init?: { method: string; body?: string },
   ): Promise<T> {
     const requestCorrelationId: CorrelationId = correlationIdOrGenerate(options.correlationId);
     const key: IdempotencyKey | undefined = optionalIdempotencyKey(options.idempotencyKey);
@@ -179,6 +179,25 @@ export class RuntimeHttpClient {
     parse: (value: unknown) => T & { correlation_id: string },
   ): Promise<T> {
     return this.call(path, options, parse);
+  }
+
+  /** PUT helper sharing the v1 envelope + correlation contract (WU13 calendar update). */
+  put<T>(
+    path: string,
+    body: unknown,
+    options: RuntimeHttpCallOptions,
+    parse: (value: unknown) => T & { correlation_id: string },
+  ): Promise<T> {
+    return this.call(path, options, parse, { method: "PUT", body: JSON.stringify(body) });
+  }
+
+  /** DELETE helper sharing the v1 envelope + correlation contract (WU13 calendar cancel). */
+  delete<T>(
+    path: string,
+    options: RuntimeHttpCallOptions,
+    parse: (value: unknown) => T & { correlation_id: string },
+  ): Promise<T> {
+    return this.call(path, options, parse, { method: "DELETE" });
   }
 }
 

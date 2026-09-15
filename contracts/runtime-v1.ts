@@ -671,6 +671,154 @@ export function parseCrmAuditResponse(value: unknown): CrmAuditResponse {
 }
 
 /**
+ * Calendar / Agenda WU13 — event + availability shapes
+ * (mirror api/queries/calendar_reads_wu13.py + api/routes/calendar_wu13.py).
+ */
+export type CalendarEventStatus = "scheduled" | "cancelled" | "completed";
+export type CalendarEventSource = "manual" | "agent";
+
+export type CalendarEventView = {
+  event_id: string;
+  title: string;
+  description: string | null;
+  starts_at: string;
+  ends_at: string;
+  contact_id: string | null;
+  lead_id: string | null;
+  property_id: string | null;
+  status: CalendarEventStatus;
+  source: CalendarEventSource;
+  notes: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type CalendarEventsResponse = CrmReadMeta & {
+  items: CalendarEventView[];
+  count: number;
+  from: string;
+  to: string;
+  include_cancelled: boolean;
+};
+
+export type AvailabilitySlot = {
+  starts_at: string;
+  ends_at: string;
+};
+
+export type AvailabilityResponse = CrmReadMeta & {
+  items: AvailabilitySlot[];
+  count: number;
+  from: string;
+  to: string;
+};
+
+export type CalendarCommandResult = {
+  resource_id: string;
+  status: string;
+  starts_at?: string;
+  ends_at?: string;
+  correlation_id: string;
+};
+
+export type CalendarCommandResponse = {
+  contract_version: typeof RUNTIME_CONTRACT_VERSION;
+  environment: "dev-only-calendar";
+  accepted: true;
+  replayed: boolean;
+  correlation_id: CorrelationId;
+  result: CalendarCommandResult;
+};
+
+function reqCalendarStatus(value: unknown, label: string): CalendarEventStatus {
+  if (value === "scheduled" || value === "cancelled" || value === "completed") return value;
+  throw new Error(`Invalid ${label}: must be scheduled|cancelled|completed`);
+}
+
+function reqCalendarSource(value: unknown, label: string): CalendarEventSource {
+  if (value === "manual" || value === "agent") return value;
+  throw new Error(`Invalid ${label}: must be manual|agent`);
+}
+
+export function parseCalendarEventsResponse(value: unknown): CalendarEventsResponse {
+  const meta = parseCrmReadMeta(value, "calendar");
+  const record = value as Record<string, unknown>;
+  const items = reqArray(record.items, "calendar.items").map((entry) => {
+    const item = reqRecord(entry, "calendar item");
+    return {
+      event_id: reqStr(item, "event_id", "calendar event_id"),
+      title: reqStr(item, "title", "calendar title"),
+      description: optStr(item, "description", "calendar description"),
+      starts_at: reqStr(item, "starts_at", "calendar starts_at"),
+      ends_at: reqStr(item, "ends_at", "calendar ends_at"),
+      contact_id: optStr(item, "contact_id", "calendar contact_id"),
+      lead_id: optStr(item, "lead_id", "calendar lead_id"),
+      property_id: optStr(item, "property_id", "calendar property_id"),
+      status: reqCalendarStatus(item.status, "calendar status"),
+      source: reqCalendarSource(item.source, "calendar source"),
+      notes: optStr(item, "notes", "calendar notes"),
+      created_at: reqStr(item, "created_at", "calendar created_at"),
+      updated_at: reqStr(item, "updated_at", "calendar updated_at"),
+    };
+  });
+  return {
+    ...meta,
+    items,
+    count: reqNum(record, "count", "calendar.count"),
+    from: reqStr(record, "from", "calendar.from"),
+    to: reqStr(record, "to", "calendar.to"),
+    include_cancelled: reqBool(record, "include_cancelled", "calendar.include_cancelled"),
+  };
+}
+
+export function parseAvailabilityResponse(value: unknown): AvailabilityResponse {
+  const meta = parseCrmReadMeta(value, "availability");
+  const record = value as Record<string, unknown>;
+  const items = reqArray(record.items, "availability.items").map((entry) => {
+    const item = reqRecord(entry, "availability item");
+    return {
+      starts_at: reqStr(item, "starts_at", "availability starts_at"),
+      ends_at: reqStr(item, "ends_at", "availability ends_at"),
+    };
+  });
+  return {
+    ...meta,
+    items,
+    count: reqNum(record, "count", "availability.count"),
+    from: reqStr(record, "from", "availability.from"),
+    to: reqStr(record, "to", "availability.to"),
+  };
+}
+
+export function parseCalendarCommandResponse(value: unknown): CalendarCommandResponse {
+  if (!isRecord(value)) throw new Error("Invalid calendar command response");
+  if (value.contract_version !== RUNTIME_CONTRACT_VERSION) throw new Error("Unsupported contract version");
+  if (value.environment !== "dev-only-calendar") throw new Error("Invalid calendar environment");
+  if (value.accepted !== true) throw new Error("Invalid calendar accepted flag");
+  if (typeof value.replayed !== "boolean") throw new Error("Invalid calendar replayed flag");
+  const correlation = reqStr(value, "correlation_id", "calendar.correlation_id");
+  correlationId(correlation);
+  const result = reqRecord(value.result, "calendar.result");
+  const parsed: CalendarCommandResult = {
+    resource_id: reqStr(result, "resource_id", "calendar.result.resource_id"),
+    status: reqStr(result, "status", "calendar.result.status"),
+    correlation_id: reqStr(result, "correlation_id", "calendar.result.correlation_id"),
+  };
+  const startsAt = optStr(result, "starts_at", "calendar.result.starts_at");
+  const endsAt = optStr(result, "ends_at", "calendar.result.ends_at");
+  if (startsAt !== null) parsed.starts_at = startsAt;
+  if (endsAt !== null) parsed.ends_at = endsAt;
+  return {
+    contract_version: RUNTIME_CONTRACT_VERSION,
+    environment: "dev-only-calendar",
+    accepted: true,
+    replayed: value.replayed,
+    correlation_id: correlation as CorrelationId,
+    result: parsed,
+  };
+}
+
+/**
  * MVP Commercial Demo WU7 — server-owned demo selector shapes
  * (mirror api/identity/demo_identity.py + api/composition_wu7_mvp.py).
  * requestedAccountId is an intent/hint only; the server resolves membership

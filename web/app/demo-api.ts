@@ -16,6 +16,9 @@ import {
   type RuntimeHttpClientOptions,
 } from "../runtime-client";
 import {
+  parseAvailabilityResponse,
+  parseCalendarCommandResponse,
+  parseCalendarEventsResponse,
   parseCrmActivityResponse,
   parseCrmAgendaResponse,
   parseCrmAuditResponse,
@@ -28,6 +31,9 @@ import {
   parseDemoContextResponse,
   parseDemoControlsResponse,
   parseDemoSimulateResponse,
+  type AvailabilityResponse,
+  type CalendarCommandResponse,
+  type CalendarEventsResponse,
   type CrmActivityResponse,
   type CrmAgendaResponse,
   type CrmAuditResponse,
@@ -69,6 +75,22 @@ export type DemoApi = {
   reset: (options?: RuntimeHttpCallOptions, clearEffects?: boolean) => Promise<DemoControlsResponse>;
   simulate: (body: { body?: string; receivedAt?: string; idempotencyKey?: string },
              options?: RuntimeHttpCallOptions) => Promise<DemoSimulateResponse>;
+  calendarEvents: (from: string, to: string, includeCancelled?: boolean,
+                  options?: RuntimeHttpCallOptions) => Promise<CalendarEventsResponse>;
+  calendarAvailability: (from: string, to: string,
+                         options?: RuntimeHttpCallOptions) => Promise<AvailabilityResponse>;
+  createCalendarEvent: (body: { title: string; startsAt: string; endsAt: string; description?: string;
+                                contactId?: string; leadId?: string; propertyId?: string;
+                                notes?: string; source?: string; idempotencyKey?: string },
+                       options?: RuntimeHttpCallOptions) => Promise<CalendarCommandResponse>;
+  updateCalendarEvent: (eventId: string, body: { title?: string; description?: string | null;
+                                                 startsAt?: string; endsAt?: string;
+                                                 contactId?: string | null; leadId?: string | null;
+                                                 propertyId?: string | null; notes?: string | null;
+                                                 status?: string; idempotencyKey?: string },
+                       options?: RuntimeHttpCallOptions) => Promise<CalendarCommandResponse>;
+  cancelCalendarEvent: (eventId: string, idempotencyKey?: string,
+                        options?: RuntimeHttpCallOptions) => Promise<CalendarCommandResponse>;
 };
 
 export type DemoApiFetcher = NonNullable<RuntimeHttpClientOptions["fetcher"]>;
@@ -105,6 +127,25 @@ export function createDemoApi(baseUrl: string, fetcher?: DemoApiFetcher): DemoAp
       ),
     simulate: (body, options) =>
       runtime.post("/v1/demo/simulate", body, options ?? {}, parseDemoSimulateResponse),
+    calendarEvents: (from, to, includeCancelled, options) => {
+      const params = new URLSearchParams({ from, to });
+      if (includeCancelled) params.set("include_cancelled", "true");
+      return runtime.get(`/v1/demo/calendar/events?${params.toString()}`, options ?? {}, parseCalendarEventsResponse);
+    },
+    calendarAvailability: (from, to, options) => {
+      const params = new URLSearchParams({ from, to });
+      return runtime.get(`/v1/demo/calendar/availability?${params.toString()}`, options ?? {}, parseAvailabilityResponse);
+    },
+    createCalendarEvent: (body, options) =>
+      runtime.post("/v1/demo/calendar/events", body, options ?? {}, parseCalendarCommandResponse),
+    updateCalendarEvent: (eventId, body, options) =>
+      runtime.put(`/v1/demo/calendar/events/${encodeURIComponent(eventId)}`, body, options ?? {}, parseCalendarCommandResponse),
+    cancelCalendarEvent: (eventId, idempotencyKey, options) => {
+      const params = new URLSearchParams();
+      if (idempotencyKey?.trim()) params.set("idempotencyKey", idempotencyKey.trim());
+      const query = params.toString() ? `?${params.toString()}` : "";
+      return runtime.delete(`/v1/demo/calendar/events/${encodeURIComponent(eventId)}${query}`, options ?? {}, parseCalendarCommandResponse);
+    },
   };
 }
 

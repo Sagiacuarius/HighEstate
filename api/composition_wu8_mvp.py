@@ -47,6 +47,7 @@ from api.queries.crm_reads import (
 )
 from api.queries.demo_cache import ScopedQueryCache, build_scoped_key
 from api.routes.audit_screen_wu12 import build_audit_screen_router
+from api.routes.calendar_wu13 import build_calendar_router
 from api.routes.simulator_wu9 import (
     build_simulator_router,
     clear_simulator_effects,
@@ -352,6 +353,10 @@ def create_mvp_dashboard_app(
     # precedent; the accepted /v1/demo/activity route above is untouched).
     app.include_router(build_audit_screen_router(composition.conn_kwargs),
                        prefix=DEMO_PREFIX, tags=["audit-screen"])
+
+    # WU13: calendar / agenda (events + availability; same mount precedent).
+    app.include_router(build_calendar_router(composition.conn_kwargs),
+                       prefix=DEMO_PREFIX, tags=["calendar"])
 
     @app.exception_handler(404)
     async def not_found(request: Request, exc):
