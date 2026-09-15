@@ -1,0 +1,63 @@
+schema: spec-driven
+
+context: |
+  Project: AI Agency Platform.
+  Evidence baseline: docs/01-brief-comercial.md, docs/02-PDR-plataforma-agencias-ia.md,
+    docs/03-arquitectura-plataforma.md, and the three files under demo/.
+  Current repository contains a static HTML/CSS/JavaScript demo and documentation;
+    no executable application stack or test runner was detected.
+  Intended stack direction: Next.js/React/TypeScript frontend; FastAPI/Python services;
+    LangGraph agent runtime; provider abstraction for Kapso and future integrations.
+  Architecture: shared runtime with Agency → ClientAccount isolation, validated tools,
+    deterministic automation engine, confirmation, execution, and audit.
+  Implementation strategy: start from a WACRM fork and adapt progressively while keeping
+    the commercial multi-tenant core under independent architectural control.
+  Artifact persistence: hybrid OpenSpec + Engram. Technical artifacts default to English.
+
+strict_tdd: false
+
+testing:
+  runner: none
+  command: ""
+  framework: none detected
+  unit: false
+  integration: false
+  e2e: false
+  coverage: false
+  linter: false
+  type_checker: false
+  formatter: false
+  reason: "The project has no executable stack, package manifest, build configuration, or test configuration."
+
+preflight:
+  execution: interactive
+  artifact_store: hybrid
+  pr_strategy: auto-chain
+  review_budget_lines: 800
+
+rules:
+  proposal:
+    - Use the listed documentation and demo files as the initial evidence sources.
+    - Include rollback considerations for risky changes.
+  specs:
+    - Write requirements in English using RFC 2119 keywords.
+    - Use Given/When/Then scenarios.
+    - Do not treat demo fixtures as persisted or operational behavior.
+  design:
+    - Preserve Agency → ClientAccount isolation and provider boundaries.
+    - Document decisions and rationale, including WACRM fork adaptation boundaries.
+  tasks:
+    - Group work by implementation phase and keep work units independently reviewable.
+    - Forecast authored changes against the 800-line review budget; use auto-chain above the threshold.
+  apply:
+    tdd: false
+    test_command: ""
+    guidelines:
+      - Do not claim test evidence when no runner is configured.
+      - Follow the progressive WACRM adaptation strategy and preserve independent core contracts.
+  verify:
+    test_command: ""
+    build_command: ""
+    coverage_threshold: 0
+  archive:
+    - Preserve the OpenSpec audit trail and corresponding Engram artifact lineage.

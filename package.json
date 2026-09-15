@@ -1,0 +1,24 @@
+{
+  "name": "ai-agency-platform-domain",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "workspaces": [
+    "web"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "build:web": "npm --workspace web run build",
+    "api:test": "python -m pytest api"
+  },
+  "devDependencies": {
+    "@testing-library/react": "^16.3.3",
+    "jsdom": "^30.0.1",
+    "next": "^15.5.23",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "typescript": "^5.8.3",
+    "vitest": "^3.2.4"
+  }
+}

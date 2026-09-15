@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Atelier — Inmobiliaria Aurea</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600&family=IBM+Plex+Mono:wght@400;500&family=Inter:wght@400;500;600;700&family=Public+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="agencia-inmobiliaria.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand"><span class="brand-mark">✦</span><span>atelier</span></div>
+      <div class="workspace-switcher"><span class="avatar gold">A</span><div><strong>Aurea Realty</strong><small>Agencia / Principal</small></div><span class="chevron">⌄</span></div>
+      <nav class="main-nav">
+        <a class="active" href="#overview" data-view="overview"><span>◈</span> Resumen <em>⌘1</em></a>
+        <a href="#inbox" data-view="inbox"><span>◌</span> Inbox <b>8</b></a>
+        <a href="#leads" data-view="leads"><span>♢</span> Leads</a>
+        <a href="#properties" data-view="properties"><span>▱</span> Propiedades</a>
+        <a href="#automations" data-view="automations"><span>⌁</span> Automatizaciones <b class="soft">3</b></a>
+        <a href="#pipeline" data-view="pipeline"><span>▥</span> Pipeline</a>
+        <a href="#calendar" data-view="calendar"><span>◷</span> Agenda <b class="soft">4</b></a>
+        <a href="#whatsapp" data-view="whatsapp"><span>◉</span> WhatsApp</a>
+      </nav>
+      <div class="nav-label">Espacio de trabajo</div>
+      <nav class="main-nav secondary">
+        <a href="#knowledge"><span>◫</span> Conocimiento</a>
+        <a href="#calendar"><span>◷</span> Agenda</a>
+        <a href="#analytics"><span>↗</span> Métricas</a>
+      </nav>
+      <div class="sidebar-bottom"><a href="#settings"><span>⚙</span> Configuración</a><div class="profile"><span class="avatar violet">MG</span><div><strong>Martina García</strong><small>Administradora</small></div><span>•••</span></div></div>
+    </aside>
+
+    <main class="main-content" id="overview">
+      <header class="topbar"><div class="crumb"><span>Agencia</span><i>/</i><strong>Aurea Realty</strong></div><div class="top-actions"><span class="status-dot"></span><span class="live-label">Sistema operativo</span><button class="icon-btn">⌕</button><button class="icon-btn">◔</button><button class="notify">♧<span></span></button></div></header>
+      <section class="content">
+        <div class="hero"><div><p class="eyebrow">Lunes, 18 de agosto de 2026 <span>·</span> Buenos Aires</p><h1>Buenas noches, Martina<span class="gold-text">.</span></h1><p class="hero-copy">Tu agencia está en movimiento. El pulso de tus oportunidades, en un solo lugar.</p></div><button class="primary-btn" onclick="openCommand()"><span>✦</span> Hablar con Atelier</button></div>
+        <div class="metric-grid">
+          <article class="metric-card"><div class="metric-top"><span>Conversaciones activas</span><span class="metric-icon">◌</span></div><strong>128</strong><div class="metric-foot positive">↗ 18,4% <span>vs. semana anterior</span></div></article>
+          <article class="metric-card"><div class="metric-top"><span>Leads calificados</span><span class="metric-icon">♢</span></div><strong>42</strong><div class="metric-foot positive">↗ 12,1% <span>vs. semana anterior</span></div></article>
+          <article class="metric-card"><div class="metric-top"><span>Tiempo de respuesta</span><span class="metric-icon">◷</span></div><strong>3<span class="unit">m</span> 12<span class="unit">s</span></strong><div class="metric-foot positive">↘ 24,8% <span>más rápido</span></div></article>
+          <article class="metric-card accent-card"><div class="metric-top"><span>Acciones del agente</span><span class="metric-icon">✦</span></div><strong>316</strong><div class="metric-foot"><span>automatizaciones ejecutadas</span></div></article>
+        </div>
+        <div class="dashboard-grid">
+          <section class="panel view-section conversations" id="inbox" data-section="inbox"><div class="panel-heading"><div><p class="eyebrow">Atención inteligente</p><h2>Conversaciones recientes</h2></div><a href="#inbox">Ver inbox <span>↗</span></a></div><div class="conversation-list"><div class="conversation selected"><span class="avatar sand">LC</span><div class="conversation-body"><div class="row"><strong>Lucía Cárdenas</strong><time>Ahora</time></div><p>¿Sigue disponible el departamento de Palermo?</p><div><span class="tag hot">Lead caliente</span><span class="channel">WhatsApp</span></div></div><span class="unread"></span></div><div class="conversation"><span class="avatar blue">RS</span><div class="conversation-body"><div class="row"><strong>Ramiro Sosa</strong><time>Hace 8 min</time></div><p>Me interesa coordinar una visita para el jueves.</p><div><span class="tag visit">Visita solicitada</span><span class="channel">WhatsApp</span></div></div></div><div class="conversation"><span class="avatar olive">MP</span><div class="conversation-body"><div class="row"><strong>Mariano Pérez</strong><time>Hace 26 min</time></div><p>Busco una casa con jardín en zona norte.</p><div><span class="tag new">Nuevo lead</span><span class="channel">WhatsApp</span></div></div></div><div class="conversation"><span class="avatar rose">SV</span><div class="conversation-body"><div class="row"><strong>Sofía Vidal</strong><time>Hace 1 h</time></div><p>¿Podrían enviarme la ficha completa?</p><div><span class="tag follow">Seguimiento hoy</span><span class="channel">WhatsApp</span></div></div></div></div></section>
+          <section class="panel agent-panel"><div class="panel-heading"><div><p class="eyebrow">Tu copiloto operativo</p><h2>Atelier AI</h2></div><span class="agent-status"><i></i> Activo</span></div><div class="agent-orb"><div class="orb-ring"></div><div class="orb-core">✦</div></div><p class="agent-message">El agente está atendiendo conversaciones, clasificando leads y ejecutando seguimientos.</p><div class="agent-stats"><div><strong>94<span>%</span></strong><small>resolución automática</small></div><div><strong>08</strong><small>acciones pendientes</small></div></div><button class="ghost-btn" onclick="openCommand()">Abrir centro de comando <span>→</span></button></section>
+          <section class="panel view-section automation-panel" id="automations" data-section="automations"><div class="panel-heading"><div><p class="eyebrow">Flujos activos</p><h2>Automatizaciones</h2></div><button class="small-btn">+ Nuevo flujo</button></div><div class="flow-list"><div class="flow"><span class="flow-icon purple">⌁</span><div><strong>Lead interesado → asesor</strong><small>Etiqueta <b>interesado</b> · Notificar equipo · Crear tarea</small></div><span class="toggle on"></span></div><div class="flow"><span class="flow-icon gold-bg">◷</span><div><strong>Recordatorio de visita</strong><small>24 h antes · WhatsApp automático</small></div><span class="toggle on"></span></div><div class="flow"><span class="flow-icon blue-bg">◌</span><div><strong>Consulta sin respuesta</strong><small>Esperar 2 h · Crear seguimiento</small></div><span class="toggle"></span></div></div></section>
+          <section class="panel view-section properties-panel" id="properties" data-section="properties"><div class="panel-heading"><div><p class="eyebrow">Catálogo</p><h2>Propiedades destacadas</h2></div><a href="#properties">Ver catálogo <span>↗</span></a></div><div class="property-list"><div class="property"><div class="property-image image-one"></div><div><span class="property-type">VENTA · PALERMO</span><strong>Casa Lumen</strong><p>3 dormitorios · Jardín · Cochera</p></div><b>USD 285.000</b></div><div class="property"><div class="property-image image-two"></div><div><span class="property-type">ALQUILER · BELGRANO</span><strong>Atelier 04</strong><p>2 ambientes · Balcón · Amenities</p></div><b>USD 1.100 / mes</b></div></div></section>
+          <section class="panel view-section pipeline-panel" id="pipeline" data-section="pipeline"><div class="panel-heading"><div><p class="eyebrow">Embudo comercial</p><h2>Pipeline de oportunidades</h2></div><button class="small-btn">+ Nuevo lead</button></div><div class="pipeline"><div class="pipeline-col"><div class="pipeline-col-head"><span>Nuevos</span><b>12</b></div><div class="lead-card"><strong>Lucía Cárdenas</strong><small>Casa Lumen · hace 4 min</small><span class="lead-value">USD 285k</span></div><div class="lead-card"><strong>Mariano Pérez</strong><small>Zona norte · hace 26 min</small><span class="lead-value">USD 190k</span></div></div><div class="pipeline-col"><div class="pipeline-col-head"><span>Calificados</span><b>8</b></div><div class="lead-card hot-card"><strong>Ramiro Sosa</strong><small>Visita solicitada</small><span class="lead-value">USD 1.100 / mes</span></div><div class="lead-card"><strong>Valentina Ruiz</strong><small>Belgrano · presupuesto confirmado</small><span class="lead-value">USD 210k</span></div></div><div class="pipeline-col"><div class="pipeline-col-head"><span>Visita / negociación</span><b>5</b></div><div class="lead-card"><strong>Tomás Ferrer</strong><small>Visita mañana · 17:30</small><span class="lead-value">USD 320k</span></div></div></div></section>
+          <section class="panel view-section calendar-panel" id="calendar" data-section="calendar"><div class="panel-heading"><div><p class="eyebrow">Próximos eventos</p><h2>Agenda del equipo</h2></div><a href="#calendar">Abrir agenda <span>↗</span></a></div><div class="calendar-list"><div class="calendar-event"><span class="event-time">09:30</span><span class="event-line"></span><div><strong>Visita · Casa Lumen</strong><small>Lucía Cárdenas · Palermo</small></div><span class="event-avatar sand">LC</span></div><div class="calendar-event"><span class="event-time">13:00</span><span class="event-line"></span><div><strong>Reunión con propietario</strong><small>Edificio Atelier 04 · Belgrano</small></div><span class="event-avatar violet">MG</span></div><div class="calendar-event"><span class="event-time">17:30</span><span class="event-line"></span><div><strong>Visita · Departamento Recoleta</strong><small>Tomás Ferrer · Recoleta</small></div><span class="event-avatar blue">TF</span></div></div></section>
+          <section class="panel view-section whatsapp-panel" id="whatsapp" data-section="whatsapp"><div class="panel-heading"><div><p class="eyebrow">Canal conectado</p><h2>WhatsApp Business</h2></div><span class="connected-badge"><i></i> Conectado</span></div><div class="whatsapp-row"><div class="whatsapp-symbol">◉</div><div><strong>Aurea Realty</strong><p>+54 9 11 5555 0182 · WhatsApp vía Kapso</p><small>Última sincronización hace 2 minutos</small></div><button class="small-btn">Gestionar conexión</button></div></section>
+        </div>
+      </section>
+    </main>
+  </div>
+  <div class="command-overlay" id="commandOverlay"><div class="command-modal"><button class="close" onclick="closeCommand()">×</button><p class="eyebrow">Atelier Operator</p><h2>¿Qué querés poner en movimiento?</h2><p class="modal-copy">Describí una tarea, una automatización o pedime un resumen de tu operación.</p><div class="command-input"><span>✦</span><input id="commandInput" placeholder="Ej. Creá un seguimiento para los leads sin respuesta..." /><button onclick="runCommand()">Enviar</button></div><div class="suggestions"><button onclick="fillCommand('Mostrame los leads calientes sin seguimiento')">Leads sin seguimiento <span>↗</span></button><button onclick="fillCommand('Creá un flujo para las consultas de visitas')">Crear automatización <span>↗</span></button></div><div class="command-result" id="commandResult"></div></div></div>
+  <script src="agencia-inmobiliaria.js"></script>
+</body>
+</html>
