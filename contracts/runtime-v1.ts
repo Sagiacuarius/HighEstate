@@ -824,13 +824,16 @@ export function parseCalendarCommandResponse(value: unknown): CalendarCommandRes
  * advisor confirms; criteria/params pass through as validated records, enums
  * and required identifiers are strict.
  */
-export type AgentDraftStatus = "proposed" | "approved" | "rejected" | "executed";
+export type AgentDraftStatus = "proposed" | "approved" | "rejected" | "executed" | "auto";
 export type AgentIntent =
   | "search_properties" | "schedule_visit" | "reschedule"
-  | "ask_question" | "update_preferences" | "general";
+  | "ask_question" | "update_preferences" | "general" | "handoff";
 export type AgentActionType =
   | "create_follow_up" | "register_interest" | "create_event"
-  | "reschedule_event" | "transition_lead";
+  | "reschedule_event" | "transition_lead" | "send_reply" | "handoff_to_human";
+export type AgentPolicyDecision = "auto" | "escalate";
+export type AgentExecutionMode = "human" | "agent_policy";
+export type AgentMode = "manual" | "auto" | "paused";
 
 export type AgentProposedAction = {
   type: AgentActionType;
@@ -847,6 +850,8 @@ export type AgentDraft = {
   reply_text: string | null;
   model_provider: string;
   model_name: string;
+  policy_decision: AgentPolicyDecision;
+  execution_mode: AgentExecutionMode;
   conversation_id: string;
   contact_id: string;
   lead_id: string | null;
@@ -860,6 +865,8 @@ export type AgentDraftCommandResponse = {
   environment: "dev-only-agent";
   accepted: true;
   replayed: boolean;
+  /** WU15: true when the analyze auto path decided + dispatched + finalized. */
+  auto_executed?: boolean;
   correlation_id: CorrelationId;
   draft: AgentDraft;
 };
@@ -874,16 +881,26 @@ export type AgentDraftResponse = CrmReadMeta & {
 };
 
 function reqAgentStatus(value: unknown, label: string): AgentDraftStatus {
-  if (value === "proposed" || value === "approved" || value === "rejected" || value === "executed") return value;
-  throw new Error(`Invalid ${label}: must be proposed|approved|rejected|executed`);
+  if (value === "proposed" || value === "approved" || value === "rejected" || value === "executed" || value === "auto") return value;
+  throw new Error(`Invalid ${label}: must be proposed|approved|rejected|executed|auto`);
+}
+
+function reqPolicyDecision(value: unknown, label: string): AgentPolicyDecision {
+  if (value === "auto" || value === "escalate") return value;
+  throw new Error(`Invalid ${label}: must be auto|escalate`);
+}
+
+function reqExecutionMode(value: unknown, label: string): AgentExecutionMode {
+  if (value === "human" || value === "agent_policy") return value;
+  throw new Error(`Invalid ${label}: must be human|agent_policy`);
 }
 
 const AGENT_INTENTS: readonly AgentIntent[] = [
   "search_properties", "schedule_visit", "reschedule", "ask_question",
-  "update_preferences", "general"];
+  "update_preferences", "general", "handoff"];
 const AGENT_ACTION_TYPES: readonly AgentActionType[] = [
   "create_follow_up", "register_interest", "create_event", "reschedule_event",
-  "transition_lead"];
+  "transition_lead", "send_reply", "handoff_to_human"];
 
 function parseAgentDraft(value: unknown, label: string): AgentDraft {
   const record = reqRecord(value, label);
@@ -893,6 +910,11 @@ function parseAgentDraft(value: unknown, label: string): AgentDraft {
   }
   const actions = reqArray(record.proposed_actions, `${label}.proposed_actions`).map((entry) => {
     const action = reqRecord(entry, `${label} action`);
+    for (const key of Object.keys(action)) {
+      if (key !== "type" && key !== "params") {
+        throw new Error(`Invalid ${label} action key: unknown key "${key}"`);
+      }
+    }
     const type = reqStr(action, "type", `${label} action.type`);
     if (!AGENT_ACTION_TYPES.includes(type as AgentActionType)) {
       throw new Error(`Invalid ${label} action.type: unknown type "${type}"`);
@@ -918,6 +940,8 @@ function parseAgentDraft(value: unknown, label: string): AgentDraft {
     reply_text: optStr(record, "reply_text", `${label}.reply_text`),
     model_provider: reqStr(record, "model_provider", `${label}.model_provider`),
     model_name: reqStr(record, "model_name", `${label}.model_name`),
+    policy_decision: reqPolicyDecision(record.policy_decision, `${label}.policy_decision`),
+    execution_mode: reqExecutionMode(record.execution_mode, `${label}.execution_mode`),
     conversation_id: reqStr(record, "conversation_id", `${label}.conversation_id`),
     contact_id: reqStr(record, "contact_id", `${label}.contact_id`),
     lead_id: optStr(record, "lead_id", `${label}.lead_id`),
@@ -935,7 +959,7 @@ export function parseAgentDraftCommandResponse(value: unknown): AgentDraftComman
   if (typeof value.replayed !== "boolean") throw new Error("Invalid agent replayed flag");
   const correlation = reqStr(value, "correlation_id", "agent.correlation_id");
   correlationId(correlation);
-  return {
+  const out: AgentDraftCommandResponse = {
     contract_version: RUNTIME_CONTRACT_VERSION,
     environment: "dev-only-agent",
     accepted: true,
@@ -943,6 +967,11 @@ export function parseAgentDraftCommandResponse(value: unknown): AgentDraftComman
     correlation_id: correlation as CorrelationId,
     draft: parseAgentDraft(value.draft, "agent.draft"),
   };
+  if (value.auto_executed !== undefined) {
+    if (typeof value.auto_executed !== "boolean") throw new Error("Invalid agent auto_executed flag");
+    out.auto_executed = value.auto_executed;
+  }
+  return out;
 }
 
 export function parseAgentDraftsResponse(value: unknown): AgentDraftsResponse {
@@ -957,6 +986,56 @@ export function parseAgentDraftResponse(value: unknown): AgentDraftResponse {
   const meta = parseCrmReadMeta(value, "agent draft");
   const record = value as Record<string, unknown>;
   return { ...meta, draft: parseAgentDraft(record.draft, "agent.draft") };
+}
+
+/**
+ * Agent Autonomy WU15 — dev-only agent state surface
+ * (mirror api/routes/agent_wu14.py _state_shape: GET /v1/demo/agent/state,
+ * POST /v1/demo/agent/state {mode: manual|auto}, POST /v1/demo/agent/handoff/resume).
+ * Scope is server-derived; the client never sends account ids. handoff_open is
+ * the agent_mode='paused' read.
+ */
+export type AgentStateResponse = {
+  contract_version: typeof RUNTIME_CONTRACT_VERSION;
+  environment: "dev-only-agent";
+  conversation_id: string;
+  agent_mode: AgentMode;
+  handoff_open: boolean;
+  account_id: string;
+  correlation_id: CorrelationId;
+};
+
+const AGENT_STATE_KEYS: readonly string[] = [
+  "contract_version", "environment", "conversation_id", "agent_mode",
+  "handoff_open", "account_id", "correlation_id"];
+
+function reqAgentMode(value: unknown, label: string): AgentMode {
+  if (value === "manual" || value === "auto" || value === "paused") return value;
+  throw new Error(`Invalid ${label}: must be manual|auto|paused`);
+}
+
+export function parseAgentStateResponse(value: unknown): AgentStateResponse {
+  if (!isRecord(value)) throw new Error("Invalid agent state response");
+  for (const key of Object.keys(value)) {
+    if (!AGENT_STATE_KEYS.includes(key)) {
+      throw new Error(`Invalid agent state key: unknown key "${key}"`);
+    }
+  }
+  if (value.contract_version !== RUNTIME_CONTRACT_VERSION) throw new Error("Unsupported contract version");
+  if (value.environment !== "dev-only-agent") throw new Error("Invalid agent environment");
+  const correlation = reqStr(value, "correlation_id", "agent state correlation_id");
+  correlationId(correlation);
+  const handoffOpen = value.handoff_open;
+  if (typeof handoffOpen !== "boolean") throw new Error("Invalid agent state handoff_open");
+  return {
+    contract_version: RUNTIME_CONTRACT_VERSION,
+    environment: "dev-only-agent",
+    conversation_id: reqStr(value, "conversation_id", "agent state conversation_id"),
+    agent_mode: reqAgentMode(value.agent_mode, "agent state agent_mode"),
+    handoff_open: handoffOpen,
+    account_id: reqStr(value, "account_id", "agent state account_id"),
+    correlation_id: correlation as CorrelationId,
+  };
 }
 
 /**

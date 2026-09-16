@@ -34,6 +34,8 @@ function draft(overrides: Record<string, unknown> = {}): unknown {
     reply_text: "Coordinamos la visita.",
     model_provider: "stub",
     model_name: "stub-keyword-v1",
+    policy_decision: "escalate",
+    execution_mode: "human",
     conversation_id: "conv-1",
     contact_id: "contact-1",
     lead_id: null,
@@ -44,10 +46,19 @@ function draft(overrides: Record<string, unknown> = {}): unknown {
   };
 }
 
-function commandEnvelope(d: unknown, replayed = false): unknown {
+function commandEnvelope(d: unknown, replayed = false, auto_executed = false): unknown {
   return {
     contract_version: "v1", environment: "dev-only-agent", accepted: true,
-    replayed, correlation_id: "c1", draft: d,
+    replayed, auto_executed, correlation_id: "c1", draft: d,
+  };
+}
+
+function agentState(overrides: Record<string, unknown> = {}): unknown {
+  return {
+    contract_version: "v1", environment: "dev-only-agent",
+    conversation_id: "conv-1", agent_mode: "manual", handoff_open: false,
+    account_id: "acct-1", correlation_id: "c1",
+    ...overrides,
   };
 }
 
@@ -95,18 +106,34 @@ const READ_BODIES: Record<string, unknown> = {
 let draftsPage: () => unknown = () => ({ ...META, count: 0, items: [] });
 let nextCommand: () => unknown = () => commandEnvelope(draft());
 let analyzeFail: { status: number; code: string; correlation: string } | null = null;
+let statePage: () => unknown = () => agentState();
+let stateFail: { status: number; code: string; correlation: string } | null = null;
 
 function stubFetch(): void {
   calls = [];
   draftsPage = () => ({ ...META, count: 0, items: [] });
   nextCommand = () => commandEnvelope(draft());
   analyzeFail = null;
+  statePage = () => agentState();
+  stateFail = null;
   vi.stubGlobal("fetch", vi.fn(async (input: string, init?: RequestInit) => {
     const url = String(input);
     const parsed = new URL(url);
     const method = init?.method ?? "GET";
     calls.push({ method, url, body: typeof init?.body === "string" ? JSON.parse(init.body) : undefined });
     if (parsed.pathname === "/v1/demo/agent/drafts" && method === "GET") return jsonOk(draftsPage());
+    if (parsed.pathname === "/v1/demo/agent/state") {
+      if (method === "GET") return jsonOk(statePage());
+      if (stateFail) {
+        return new Response(JSON.stringify({
+          error: { code: stateFail.code, message: `stub ${stateFail.code}`, correlation_id: stateFail.correlation },
+        }), { status: stateFail.status, headers: { "content-type": "application/json", "x-correlation-id": stateFail.correlation } });
+      }
+      return jsonOk(statePage());
+    }
+    if (parsed.pathname === "/v1/demo/agent/handoff/resume" && method === "POST") {
+      return jsonOk(agentState({ agent_mode: "auto", handoff_open: false }));
+    }
     if (parsed.pathname === "/v1/demo/agent/analyze") {
       if (analyzeFail) {
         return new Response(JSON.stringify({
@@ -209,5 +236,100 @@ describe("WU14 conversational agent draft cards", () => {
     fireEvent.click(await screen.findByRole("button", { name: /Analizar con el agente/ }));
     expect(await screen.findByText(/corr-agent-err/)).toBeTruthy();
     expect(screen.getByText(/502 · provider_unavailable/)).toBeTruthy();
+  });
+});
+
+describe("WU15 agent autonomy: auto badge, handoff, mode switch, resume", () => {
+  beforeEach(() => stubFetch());
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
+
+  function autoDraft(overrides: Record<string, unknown> = {}): unknown {
+    return draft({
+      status: "auto",
+      intent: "handoff",
+      criteria: {},
+      proposed_actions: [
+        { type: "send_reply", params: { source: "kb_article", article_id: "kb-1" } },
+        { type: "handoff_to_human", params: { reason: "reclamo del lead" } },
+      ],
+      reply_text: null,
+      policy_decision: "auto",
+      execution_mode: "agent_policy",
+      decided_at: "2026-09-15T07:00:00.000Z",
+      execution_result: [{ index: 1, type: "handoff_to_human", outcome: "success", resource_id: "conv-1" }],
+      ...overrides,
+    });
+  }
+
+  it("auto badge renders on auto drafts and approve/reject stay hidden", async () => {
+    draftsPage = () => ({ ...META, count: 1, items: [autoDraft()] });
+    const { default: DashboardPage } = await import("./page");
+    render(React.createElement(DashboardPage));
+    await openInboxAndConversation();
+    expect(await screen.findByText(/Auto · decisión automática/)).toBeTruthy();
+    expect(screen.getAllByText("Derivación a humano").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Automático").length).toBeGreaterThan(0);
+    expect(screen.queryByRole("button", { name: "Aprobar" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Rechazar" })).toBeNull();
+  });
+
+  it("handoff flag + paused indicator render on the handoff-open row", async () => {
+    statePage = () => agentState({ agent_mode: "paused", handoff_open: true });
+    draftsPage = () => ({ ...META, count: 1, items: [autoDraft()] });
+    const { default: DashboardPage } = await import("./page");
+    render(React.createElement(DashboardPage));
+    await openInboxAndConversation();
+    expect(await screen.findByText("Pausado")).toBeTruthy();
+    expect(screen.getAllByText("Derivado a humano").length).toBeGreaterThan(0);
+    expect(screen.getByText("Modo: Pausado")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Retomar conversación" })).toBeTruthy();
+  });
+
+  it("mode switch posts to the typed state endpoint and refreshes", async () => {
+    const { default: DashboardPage } = await import("./page");
+    render(React.createElement(DashboardPage));
+    await openInboxAndConversation();
+    const stateGetsBefore = calls.filter((c) => c.url.includes("/v1/demo/agent/state") && c.method === "GET").length;
+    fireEvent.click(await screen.findByRole("button", { name: "Automático" }));
+    await waitFor(() => {
+      const posts = calls.filter((c) => c.url.endsWith("/v1/demo/agent/state") && c.method === "POST");
+      expect(posts.length).toBe(1);
+      expect((posts[0].body as { mode?: string }).mode).toBe("auto");
+      for (const c of posts) expect(c.url).not.toMatch(/clientAccountId|account_id=/);
+    });
+    expect(await screen.findByText(/Modo automático activado/)).toBeTruthy();
+    await waitFor(() => {
+      const stateGetsAfter = calls.filter((c) => c.url.includes("/v1/demo/agent/state") && c.method === "GET").length;
+      const draftGets = calls.filter((c) => c.url.includes("/v1/demo/agent/drafts") && c.method === "GET").length;
+      expect(stateGetsAfter + draftGets).toBeGreaterThan(stateGetsBefore);
+    });
+  });
+
+  it("resume wires to the handoff resume endpoint with refresh", async () => {
+    statePage = () => agentState({ agent_mode: "paused", handoff_open: true });
+    const { default: DashboardPage } = await import("./page");
+    render(React.createElement(DashboardPage));
+    await openInboxAndConversation();
+    fireEvent.click(await screen.findByRole("button", { name: "Retomar conversación" }));
+    await waitFor(() => {
+      const resumes = calls.filter((c) => c.url.endsWith("/v1/demo/agent/handoff/resume"));
+      expect(resumes.length).toBe(1);
+      expect(resumes[0].method).toBe("POST");
+    });
+    expect(await screen.findByText(/Conversación retomada/)).toBeTruthy();
+  });
+
+  it("mode failure surfaces the envelope with correlation", async () => {
+    stateFail = { status: 409, code: "agent_handoff_open", correlation: "corr-state-err" };
+    statePage = () => agentState({ agent_mode: "manual", handoff_open: false });
+    const { default: DashboardPage } = await import("./page");
+    render(React.createElement(DashboardPage));
+    await openInboxAndConversation();
+    fireEvent.click(await screen.findByRole("button", { name: "Automático" }));
+    expect(await screen.findByText(/corr-state-err/)).toBeTruthy();
+    expect(screen.getByText(/409 · agent_handoff_open/)).toBeTruthy();
   });
 });

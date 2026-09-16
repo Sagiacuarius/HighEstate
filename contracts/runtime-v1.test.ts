@@ -9,6 +9,7 @@ import {
   parseAgentDraftCommandResponse,
   parseAgentDraftsResponse,
   parseAgentDraftResponse,
+  parseAgentStateResponse,
   parseAvailabilityResponse,
   parseCalendarCommandResponse,
   parseCalendarEventsResponse,
@@ -238,6 +239,8 @@ function draftFixture(overrides: Record<string, unknown> = {}): Record<string, u
     reply_text: "Coordinamos la visita.",
     model_provider: "stub",
     model_name: "stub-keyword-v1",
+    policy_decision: "escalate",
+    execution_mode: "human",
     conversation_id: "66000000-0000-0000-0000-000000000001",
     contact_id: "61000000-0000-0000-0000-000000000001",
     lead_id: null,
@@ -303,5 +306,85 @@ describe("conversational agent contracts (WU14)", () => {
       account_id: "a", as_of: "x", correlation_id: "c", count: 1,
       items: [draftFixture({ status: "unknown" })],
     })).toThrow();
+  });
+});
+
+function agentStateFixture(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    contract_version: "v1",
+    environment: "dev-only-agent",
+    conversation_id: "66000000-0000-0000-0000-000000000001",
+    agent_mode: "auto",
+    handoff_open: false,
+    account_id: "acct-1",
+    correlation_id: "corr-s",
+    ...overrides,
+  };
+}
+
+describe("agent autonomy contracts (WU15)", () => {
+  it("parses an auto draft with the handoff vocabulary and auto_executed", () => {
+    const cmd = parseAgentDraftCommandResponse({
+      contract_version: "v1",
+      environment: "dev-only-agent",
+      accepted: true,
+      replayed: false,
+      auto_executed: true,
+      correlation_id: "corr-a",
+      draft: draftFixture({
+        status: "auto",
+        intent: "handoff",
+        criteria: {},
+        proposed_actions: [
+          { type: "send_reply", params: { source: "kb_article", article_id: "kb-1" } },
+          { type: "handoff_to_human", params: { reason: "reclamo del lead" } },
+        ],
+        policy_decision: "auto",
+        execution_mode: "agent_policy",
+      }),
+    });
+    expect(cmd.auto_executed).toBe(true);
+    expect(cmd.draft.status).toBe("auto");
+    expect(cmd.draft.intent).toBe("handoff");
+    expect(cmd.draft.policy_decision).toBe("auto");
+    expect(cmd.draft.execution_mode).toBe("agent_policy");
+    expect(cmd.draft.proposed_actions[1]?.type).toBe("handoff_to_human");
+  });
+
+  it("rejects invalid policy_decision / execution_mode enums", () => {
+    expect(() => parseAgentDraftsResponse({
+      account_id: "a", as_of: "x", correlation_id: "c", count: 1,
+      items: [draftFixture({ policy_decision: "maybe" })],
+    })).toThrow(/policy_decision/);
+    expect(() => parseAgentDraftsResponse({
+      account_id: "a", as_of: "x", correlation_id: "c", count: 1,
+      items: [draftFixture({ execution_mode: "robot" })],
+    })).toThrow(/execution_mode/);
+    expect(() => parseAgentDraftCommandResponse({
+      contract_version: "v1", environment: "dev-only-agent", accepted: true,
+      replayed: false, auto_executed: "yes", correlation_id: "c",
+      draft: draftFixture(),
+    })).toThrow(/auto_executed/);
+  });
+
+  it("rejects unknown nested keys inside proposed actions", () => {
+    expect(() => parseAgentDraftsResponse({
+      account_id: "a", as_of: "x", correlation_id: "c", count: 1,
+      items: [draftFixture({
+        proposed_actions: [{ type: "send_reply", params: {}, rogue: true }],
+      })],
+    })).toThrow(/unknown key/);
+  });
+
+  it("parses the agent state shape and rejects bad enums / keys / env", () => {
+    const parsed = parseAgentStateResponse(agentStateFixture({ agent_mode: "paused", handoff_open: true }));
+    expect(parsed.agent_mode).toBe("paused");
+    expect(parsed.handoff_open).toBe(true);
+    expect(parsed.environment).toBe("dev-only-agent");
+    expect(() => parseAgentStateResponse(agentStateFixture({ agent_mode: "sleeping" }))).toThrow(/agent_mode/);
+    expect(() => parseAgentStateResponse(agentStateFixture({ handoff_open: "yes" }))).toThrow(/handoff_open/);
+    expect(() => parseAgentStateResponse(agentStateFixture({ environment: "dev-only-calendar" }))).toThrow();
+    expect(() => parseAgentStateResponse(agentStateFixture({ rogue: 1 }))).toThrow(/unknown key/);
+    expect(() => parseAgentStateResponse(null)).toThrow();
   });
 });

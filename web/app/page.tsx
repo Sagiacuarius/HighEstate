@@ -23,12 +23,15 @@ import {
   ACTION_LABELS,
   describeCriteria,
   describeExecution,
+  agentModeLabel,
+  policyDecisionLabel,
   type AuditFilterState,
   type DemoApi,
 } from "./demo-api";
 import { RuntimeHttpError } from "../runtime-client";
 import type {
   AgentDraft,
+  AgentStateResponse,
   CrmInboxItem,
   DemoContextResponse,
 } from "../../contracts/runtime-v1";
@@ -108,10 +111,12 @@ const STATUS_LABELS: Record<string, string> = {
   "crm.calendar.update": "Evento actualizado",
   "crm.calendar.cancel": "Evento cancelado",
   // WU14 (conversational agent): estados de borrador y acciones del audit.
+  // WU15 (agent autonomy): el estado auto de un borrador ejecutado por la política.
   proposed: "Propuesto",
   approved: "Aprobado",
   rejected: "Rechazado",
   executed: "Ejecutado",
+  auto: "Automático",
   "crm.agent.analyze": "Análisis del agente",
   "crm.agent.decide": "Decisión del agente",
   "crm.agent.execute": "Borrador ejecutado",
@@ -174,6 +179,10 @@ export default function DashboardPage(): React.ReactElement {
   const [agentNote, setAgentNote] = React.useState<string | null>(null);
   const [analyzing, setAnalyzing] = React.useState(false);
   const [decisionBusy, setDecisionBusy] = React.useState<string | null>(null);
+  // WU15 (agent autonomy): dev-only agent state per conversation (mode switch
+  // + handoff resume); null while unloaded or when the read fails closed.
+  const [agentState, setAgentState] = React.useState<AgentStateResponse | null>(null);
+  const [modeBusy, setModeBusy] = React.useState(false);
 
   const reload = React.useCallback(
     async (client: DemoApi) => {
@@ -433,6 +442,7 @@ export default function DashboardPage(): React.ReactElement {
       setThread(null);
       setDrafts([]);
       setAgentNote(null);
+      setAgentState(null);
       await reload(api);
       await loadDrafts(api, null);
     } catch (error) {
@@ -453,7 +463,19 @@ export default function DashboardPage(): React.ReactElement {
       setThread(null);
     }
     await loadDrafts(api, item.conversation_id);
+    await loadAgentState(api, item.conversation_id);
   };
+
+  // WU15: the handoff flag + paused indicator come from the dev-only agent
+  // state read (the accepted WU6 inbox response stays byte-identical). A
+  // failed read fails closed to null — never a stale mode.
+  const loadAgentState = React.useCallback(async (client: DemoApi, conversationId: string | null): Promise<void> => {
+    try {
+      setAgentState(await client.getAgentState(conversationId ?? undefined));
+    } catch {
+      setAgentState(null);
+    }
+  }, []);
 
   const loadDrafts = React.useCallback(async (client: DemoApi, conversationId: string | null): Promise<void> => {
     setDraftsLoading(true);
@@ -490,11 +512,16 @@ export default function DashboardPage(): React.ReactElement {
     setAgentNote(null);
     try {
       const result = await api.analyzeMessage(body);
-      setAgentNote(result.replayed
-        ? "Borrador ya existía para este mensaje (repetición)"
-        : "Borrador propuesto — revisalo y aprobalo o rechazalo");
+      setAgentNote(result.auto_executed
+        ? "Ejecutado por la política — sin revisión manual"
+        : result.replayed
+          ? "Borrador ya existía para este mensaje (repetición)"
+          : "Borrador propuesto — revisalo y aprobalo o rechazalo");
       setAgentBody("");
       await loadDrafts(api, selectedConversation);
+      // The auto path may pause the conversation (handoff escalation):
+      // refresh the state read so the flag + switch stay truthful.
+      await loadAgentState(api, selectedConversation);
     } catch (error) {
       const correlation = error instanceof RuntimeHttpError
         ? ` · ${error.envelope.error.correlation_id}` : "";
@@ -519,10 +546,54 @@ export default function DashboardPage(): React.ReactElement {
       // The approved actions mutate CRM data (follow-ups, events, interests):
       // refresh the account reads so the badges stay DB-derived.
       await reload(api);
+      await loadAgentState(api, selectedConversation);
     } catch (error) {
-      setAgentNote(`Decisión falló: ${errorText(error)}`);
+      const correlation = error instanceof RuntimeHttpError
+        ? ` · ${error.envelope.error.correlation_id}` : "";
+      setAgentNote(`Decisión falló: ${errorText(error)}${correlation}`);
     } finally {
       setDecisionBusy(null);
+    }
+  };
+
+  // WU15 dev-only Auto/Manual switch + handoff resume. The server derives the
+  // scope (never a client account id); every mutation refreshes drafts + state.
+  const runAgentMode = async (mode: "manual" | "auto"): Promise<void> => {
+    if (!api || modeBusy) return;
+    setModeBusy(true);
+    setAgentNote(null);
+    try {
+      const state = await api.setAgentMode(mode);
+      setAgentState(state);
+      setAgentNote(mode === "auto"
+        ? "Modo automático activado — el agente puede ejecutar la política"
+        : "Modo manual activado — los borradores requieren tu aprobación");
+      await loadDrafts(api, selectedConversation);
+    } catch (error) {
+      const correlation = error instanceof RuntimeHttpError
+        ? ` · ${error.envelope.error.correlation_id}` : "";
+      setAgentNote(`Cambio de modo falló: ${errorText(error)}${correlation}`);
+    } finally {
+      setModeBusy(false);
+    }
+  };
+
+  const runResumeHandoff = async (): Promise<void> => {
+    if (!api || modeBusy) return;
+    setModeBusy(true);
+    setAgentNote(null);
+    try {
+      const state = await api.resumeHandoff();
+      setAgentState(state);
+      setAgentNote("Conversación retomada — el agente vuelve a modo automático");
+      await loadDrafts(api, selectedConversation);
+      await reload(api);
+    } catch (error) {
+      const correlation = error instanceof RuntimeHttpError
+        ? ` · ${error.envelope.error.correlation_id}` : "";
+      setAgentNote(`Retomar falló: ${errorText(error)}${correlation}`);
+    } finally {
+      setModeBusy(false);
     }
   };
 
@@ -733,6 +804,9 @@ export default function DashboardPage(): React.ReactElement {
                         <div className="row"><strong>{item.contact_name}</strong><time>{item.last_message ? formatTimeUtc(item.last_message.created_at) : "—"}</time></div>
                         <p>{item.last_message ? item.last_message.body : "Sin mensajes"}</p>
                         <div><span className="tag follow">{statusLabel(item.status)}</span><span className="channel">{item.unread_count} sin leer</span></div>
+                        {agentState && agentState.handoff_open && agentState.conversation_id === item.conversation_id ? (
+                          <div><span className="tag hot">Derivado a humano</span><span className="channel">Pausado</span></div>
+                        ) : null}
                       </div>
                       {item.unread_count > 0 ? <span className="unread"></span> : null}
                     </div>
@@ -755,6 +829,19 @@ export default function DashboardPage(): React.ReactElement {
                   <div className="agent-block">
                     <div className="panel-heading"><div><p className="eyebrow">Agente · borradores a confirmar</p><h2>Asistente de {account ? account.client_account_name : "…"}</h2></div></div>
                     <p className="empty-note">El agente lee el mensaje, busca propiedades y sugiere una franja libre. Nada se aplica hasta que apruebes el borrador.</p>
+                    {agentState && selectedConversation && agentState.conversation_id === selectedConversation ? (
+                      <div className="agent-chips">
+                        <span className="soft">Modo: {agentModeLabel(agentState.agent_mode)}</span>
+                        {agentState.handoff_open ? <span className="status-pill hot">Derivado a humano</span> : null}
+                      </div>
+                    ) : null}
+                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 10 }}>
+                      <button className="ghost-btn" disabled={modeBusy || !selectedConversation} onClick={() => void runAgentMode("auto")}>Automático</button>
+                      <button className="ghost-btn" disabled={modeBusy || !selectedConversation} onClick={() => void runAgentMode("manual")}>Manual</button>
+                      {agentState && agentState.handoff_open && selectedConversation && agentState.conversation_id === selectedConversation ? (
+                        <button className="ghost-btn danger" disabled={modeBusy} onClick={() => void runResumeHandoff()}>Retomar conversación</button>
+                      ) : null}
+                    </div>
                     <div className="agent-analyze">
                       <textarea
                         value={agentBody}
@@ -784,6 +871,16 @@ export default function DashboardPage(): React.ReactElement {
                             </div>
                             <span className={pillFor(draft.status)}>{statusLabel(draft.status)}</span>
                           </div>
+                          {draft.execution_mode === "agent_policy" ? (
+                            <div className="agent-chips">
+                              <span className="status-pill ok">Auto · {policyDecisionLabel(draft.policy_decision)}</span>
+                            </div>
+                          ) : null}
+                          {draft.intent === "handoff" ? (
+                            <div className="agent-chips">
+                              <span className="status-pill hot">Derivado a humano</span>
+                            </div>
+                          ) : null}
                           {chips.length > 0 ? <div className="agent-chips">{chips.map((c) => <span className="soft" key={c}>{c}</span>)}</div> : null}
                           {draft.matched_property_ids.length > 0 ? (
                             <div className="agent-chips">

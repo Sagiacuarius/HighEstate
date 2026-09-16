@@ -19,6 +19,7 @@ import {
   parseAgentDraftsResponse,
   parseAgentDraftResponse,
   parseAgentDraftCommandResponse,
+  parseAgentStateResponse,
   parseAvailabilityResponse,
   parseCalendarCommandResponse,
   parseCalendarEventsResponse,
@@ -37,6 +38,7 @@ import {
   type AgentDraftsResponse,
   type AgentDraftResponse,
   type AgentDraftCommandResponse,
+  type AgentStateResponse,
   type AvailabilityResponse,
   type CalendarCommandResponse,
   type CalendarEventsResponse,
@@ -102,7 +104,14 @@ export type DemoApi = {
   analyzeMessage: (body: string, options?: RuntimeHttpCallOptions) => Promise<AgentDraftCommandResponse>;
   approveDraft: (draftId: string, options?: RuntimeHttpCallOptions) => Promise<AgentDraftCommandResponse>;
   rejectDraft: (draftId: string, options?: RuntimeHttpCallOptions) => Promise<AgentDraftCommandResponse>;
+  /** WU15 dev-only agent state: scope is server-derived, never a client account id. */
+  getAgentState: (conversationId?: string, options?: RuntimeHttpCallOptions) => Promise<AgentStateResponse>;
+  setAgentMode: (mode: AgentModeInput, options?: RuntimeHttpCallOptions) => Promise<AgentStateResponse>;
+  resumeHandoff: (options?: RuntimeHttpCallOptions) => Promise<AgentStateResponse>;
 };
+
+/** WU15 dev-only mode switch input: paused is handoff-only, never settable here. */
+export type AgentModeInput = "manual" | "auto";
 
 export type DemoApiFetcher = NonNullable<RuntimeHttpClientOptions["fetcher"]>;
 
@@ -171,6 +180,16 @@ export function createDemoApi(baseUrl: string, fetcher?: DemoApiFetcher): DemoAp
       runtime.post(`/v1/demo/agent/drafts/${encodeURIComponent(draftId)}/approve`, {}, options ?? {}, parseAgentDraftCommandResponse),
     rejectDraft: (draftId, options) =>
       runtime.post(`/v1/demo/agent/drafts/${encodeURIComponent(draftId)}/reject`, {}, options ?? {}, parseAgentDraftCommandResponse),
+    getAgentState: (conversationId, options) => {
+      const params = new URLSearchParams();
+      if (conversationId?.trim()) params.set("conversation_id", conversationId.trim());
+      const query = params.toString() ? `?${params.toString()}` : "";
+      return runtime.get(`/v1/demo/agent/state${query}`, options ?? {}, parseAgentStateResponse);
+    },
+    setAgentMode: (mode, options) =>
+      runtime.post("/v1/demo/agent/state", { mode }, options ?? {}, parseAgentStateResponse),
+    resumeHandoff: (options) =>
+      runtime.post("/v1/demo/agent/handoff/resume", {}, options ?? {}, parseAgentStateResponse),
   };
 }
 
@@ -273,6 +292,7 @@ export const INTENT_LABELS: Record<string, string> = {
   ask_question: "Consulta",
   update_preferences: "Actualizar preferencias",
   general: "General",
+  handoff: "Derivación a humano",
 };
 
 export const ACTION_LABELS: Record<string, string> = {
@@ -281,7 +301,22 @@ export const ACTION_LABELS: Record<string, string> = {
   register_interest: "Registrar interés en propiedad",
   create_follow_up: "Crear seguimiento",
   transition_lead: "Avanzar prospecto de etapa",
+  send_reply: "Enviar respuesta al lead",
+  handoff_to_human: "Derivar a un humano",
 };
+
+/** Spanish label for the persisted policy verdict (server stays language-neutral). */
+export function policyDecisionLabel(decision: string): string {
+  return decision === "auto" ? "decisión automática" : decision === "escalate" ? "derivado" : decision;
+}
+
+/** Spanish label for the dev-only agent mode (server stays language-neutral). */
+export function agentModeLabel(mode: string): string {
+  if (mode === "auto") return "Automático";
+  if (mode === "manual") return "Manual";
+  if (mode === "paused") return "Pausado";
+  return mode;
+}
 
 const CRITERIA_VALUE_LABELS: Record<string, Record<string, string>> = {
   operation_type: { sale: "venta", rent: "alquiler", temporary_rent: "temporario" },
