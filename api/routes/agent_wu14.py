@@ -17,14 +17,26 @@ retry re-runs safely), then one atomic finalize that records the aggregate
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any
-from uuid import NAMESPACE_URL, uuid5
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
+from api.adapters.postgres_agent_console import (
+    ALL_CONSOLE_ACTION_TYPES,
+    LEGACY_FIELD_ALLOWLIST,
+    ConsoleSettings,
+    default_verdict,
+    load_calendar_config,
+    load_console_settings,
+    load_field_allowlist,
+    preview_prompt,
+    score_question,
+)
 from api.adapters.postgres_agent_drafts import (
     AgentDraftRepository,
     conversation_contact,
@@ -35,7 +47,10 @@ from api.adapters.postgres_agent_drafts import (
 )
 from api.adapters.postgres_core import ConnectionPool, PostgresRunner
 from api.adapters.postgres_idempotency import IdempotencyConflict
-from api.adapters.postgres_knowledge_base import KnowledgeBaseRepository
+from api.adapters.postgres_knowledge_base import (
+    KnowledgeBaseRepository,
+    normalize_tokens,
+)
 from api.application.agent_commands_wu14 import (
     AnalyzeInboundMessageCommand,
     DecideAgentDraftCommand,
@@ -45,7 +60,23 @@ from api.application.agent_commands_wu15 import (
     PersistOutboundReplyCommand,
     SetConversationAgentModeCommand,
 )
-from api.application.agent_policy import ESCALATION_MECHANICS
+from api.application.agent_commands_wu16 import (
+    ALLOWLIST_COLUMNS,
+    KB_CATEGORIES,
+    CreateAgentPromptVersionCommand,
+    CreateKbArticleCommand,
+    DeactivateKbArticleCommand,
+    UpdateAgentSettingsCommand,
+    UpdateCalendarConfigCommand,
+    UpdateFieldAllowlistCommand,
+    UpdateKbArticleCommand,
+)
+from api.application.agent_persona import build_system_prompt, compose_prompt
+from api.application.agent_policy import (
+    AUTO_ACTION_TYPES,
+    AUTO_EVENT_CREATION,
+    ESCALATION_MECHANICS,
+)
 from api.application.calendar_commands_wu13 import (
     CreateCalendarEventCommand,
     UpdateCalendarEventCommand,
@@ -85,8 +116,27 @@ _STATE_KEYS = frozenset({"mode"})
 _NOT_FOUND_REASONS = frozenset({
     "conversation_not_found_in_scope", "contact_not_found_in_scope",
     "draft_not_found_in_scope",
+    "prompt_version_not_found_in_scope", "kb_article_not_found_in_scope",
 })
 _CONFLICT_REASONS = frozenset({"draft_not_proposed", "draft_not_approved"})
+
+# `TransitionLeadStageCommand._apply` writes stage_id AND status together, so
+# the dispatch gate requires BOTH allowed (dual-column gate, WU16).
+_TRANSITION_WRITES = frozenset({"stage_id", "status"})
+
+# Console idempotency namespace: console:{scope}:{entity}:{key}.
+_SETTINGS_KEYS = frozenset({"global_auto", "calendar_auto_enabled",
+                            "matrix", "idempotencyKey"})
+_PROMPT_KEYS = frozenset({"tone", "instructions", "idempotencyKey"})
+_REVERT_KEYS = frozenset({"idempotencyKey"})
+_KB_WRITE_KEYS = frozenset({"category", "question", "keywords", "answer",
+                            "idempotencyKey"})
+_KB_DELETE_KEYS = frozenset({"idempotencyKey"})
+_SELFTEST_KEYS = frozenset({"question"})
+_CALENDAR_KEYS = frozenset({"window_start", "window_end", "slot_minutes",
+                            "working_days", "destination_label",
+                            "idempotencyKey"})
+_ALLOWLIST_KEYS = frozenset({"allowed", "idempotencyKey"})
 
 
 def _iso(value: datetime | None) -> str | None:
@@ -165,21 +215,122 @@ def _state_shape(*, conversation_id: str, agent_mode: str, account_id: str,
     }
 
 
+async def _console_settings_or_default(context: Any,
+                                         runner: PostgresRunner) -> ConsoleSettings:
+    """Policy overlay for the context account; pre-009 bases (or any read
+    failure) fall back to the code constants, so old behavior is exact."""
+    try:
+        return await load_console_settings(context, runner)
+    except Exception:
+        matrix = {action: default_verdict(action)
+                  for action in ALL_CONSOLE_ACTION_TYPES}
+        return ConsoleSettings(
+            auto_types=frozenset(AUTO_ACTION_TYPES),
+            calendar_allowed=bool(AUTO_EVENT_CREATION),
+            global_auto=True,
+            matrix=matrix,
+        )
+
+
+async def _console_allowlist_or_default(context: Any,
+                                        runner: PostgresRunner) -> frozenset:
+    """Allowed lead columns; pre-009 bases fall back to the legacy effect."""
+    try:
+        return await load_field_allowlist(context, runner)
+    except Exception:
+        return frozenset(LEGACY_FIELD_ALLOWLIST)
+
+
+async def _console_prompt_or_default(context: Any,
+                                     runner: PostgresRunner) -> str:
+    """Exact system-prompt text the model receives; missing rows/tables fall
+    back to the accepted defaults."""
+    try:
+        return await preview_prompt(context, runner)
+    except Exception:
+        return build_system_prompt()
+
+
+def _console_key(account_id: str, entity: str, raw: dict[str, Any],
+                 canonical: dict[str, Any]) -> str:
+    """console:{scope}:{entity}:{key}: client key when supplied, else a
+    deterministic content hash (same payload replays, new payload is new)."""
+    client = raw.get("idempotencyKey")
+    if isinstance(client, str) and client.strip():
+        return f"console:{account_id}:{entity}:{client.strip()}"
+    digest = hashlib.sha256(json.dumps(
+        canonical, sort_keys=True, separators=(",", ":"),
+        default=str).encode("utf-8")).hexdigest()[:24]
+    return f"console:{account_id}:{entity}:{digest}"
+
+
+def _console_ok(correlation: str, resource: str, payload: dict[str, Any],
+                *, replayed: bool = False) -> JSONResponse:
+    content = {"contract_version": "v1", "environment": AGENT_ENVIRONMENT,
+               "accepted": True, "replayed": replayed,
+               "correlation_id": correlation, resource: payload}
+    return JSONResponse(status_code=200, headers={"X-Correlation-Id": correlation},
+                        content=content)
+
+
+async def _console_body(request: Request, correlation: str,
+                        allowed: frozenset) -> tuple[dict[str, Any] | None, Any]:
+    try:
+        raw = await request.json()
+    except Exception:
+        raw = None
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, dict):
+        return None, envelope(400, "invalid_command",
+                              "body must be an object", correlation)
+    unknown = set(raw.keys()) - allowed
+    if unknown:
+        return None, envelope(400, "invalid_command",
+                              f"unsupported keys: {sorted(unknown)}",
+                              correlation)
+    return raw, None
+
+
+def _uuid_or_none(value: str) -> str | None:
+    try:
+        return str(UUID(str(value)))
+    except (ValueError, AttributeError):
+        return None
+
+
 async def _dispatch_actions(*, context: Any, draft: AgentDraft,
                             indexed: list[tuple[int, Any]], account_id: str,
                             follow_up_cmd: Any, interest_cmd: Any,
                             create_event_cmd: Any, update_event_cmd: Any,
                             reply_cmd: Any, mode_cmd: Any,
-                            transition_cmd: Any) -> list[dict[str, Any]]:
+                            transition_cmd: Any,
+                            allowed_lead_fields: frozenset | None = None
+                            ) -> list[dict[str, Any]]:
     """Shared per-action saga dispatch (approve, auto path, handoff
     escalation). Keys stay `agent-draft:{draft_id}:{original_index}` so a
     filtered (mechanics-only) dispatch remains idempotent with the full one.
-    Existing branches are byte-identical to the accepted approve loop."""
+    Existing branches are byte-identical to the accepted approve loop.
+
+    WU16 allowlist gate: the `transition_lead` branch requires BOTH
+    `stage_id` AND `status` allowed (the accepted command writes both
+    together); disallowed records `outcome=denied,
+    reason=lead_field_not_allowed` truthfully and the saga still finalizes
+    (overlap-denial precedent). None (the default) means the legacy
+    pre-console effect {stage_id, status}.
+    """
+    allowed = (set(allowed_lead_fields) if allowed_lead_fields is not None
+               else set(LEGACY_FIELD_ALLOWLIST))
     results: list[dict[str, Any]] = []
     for index, action in indexed:
         entry: dict[str, Any] = {"index": index, "type": action.type}
         key = f"agent-draft:{draft.id}:{index}"
         params = action.params
+        if (action.type == "transition_lead"
+                and not _TRANSITION_WRITES <= allowed):
+            entry.update(outcome="denied", reason="lead_field_not_allowed")
+            results.append(entry)
+            continue
         try:
             if action.type == "create_follow_up":
                 due_at = datetime.fromisoformat(str(params["due_at"]).replace("Z", "+00:00"))
@@ -287,10 +438,20 @@ def build_agent_router(conn_kwargs: dict[str, Any], model_provider: Any | None =
         )
         return str(rows[0]["id"]) if rows else None
 
+    async def _availability(ctx: Any, **kw: Any):
+        """Free slots under the account's console calendar config (WU16);
+        missing rows/tables fall back to the module constants, so bare
+        behavior is exact on pre-009 bases."""
+        try:
+            calendar = await load_calendar_config(ctx, runner)
+        except Exception:
+            calendar = None
+        return await free_slots(ctx, runner, calendar=calendar, **kw)
+
     agent = ConversationAgent(
         provider,
         search=lambda ctx, criteria: search_properties_for_criteria(ctx, runner, criteria),
-        availability=lambda ctx, **kw: free_slots(ctx, runner, **kw),
+        availability=_availability,
         upcoming=lambda ctx, **kw: upcoming_event(ctx, runner, **kw),
         kb_lookup=_kb_lookup,
         price_read=_price_read,
@@ -307,6 +468,13 @@ def build_agent_router(conn_kwargs: dict[str, Any], model_provider: Any | None =
     reply_cmd = PersistOutboundReplyCommand(dict(conn_kwargs))
     mode_cmd = SetConversationAgentModeCommand(dict(conn_kwargs))
     transition_cmd = TransitionLeadStageCommand(dict(conn_kwargs))
+    settings_cmd = UpdateAgentSettingsCommand(dict(conn_kwargs))
+    prompt_cmd = CreateAgentPromptVersionCommand(dict(conn_kwargs))
+    kb_create_cmd = CreateKbArticleCommand(dict(conn_kwargs))
+    kb_update_cmd = UpdateKbArticleCommand(dict(conn_kwargs))
+    kb_deactivate_cmd = DeactivateKbArticleCommand(dict(conn_kwargs))
+    calendar_cmd = UpdateCalendarConfigCommand(dict(conn_kwargs))
+    allowlist_cmd = UpdateFieldAllowlistCommand(dict(conn_kwargs))
 
     async def _context(request: Request, correlation: str):
         composition = request.app.state.demo_composition
@@ -361,9 +529,21 @@ def build_agent_router(conn_kwargs: dict[str, Any], model_provider: Any | None =
                             "resource is not available in this account scope", correlation)
         lead_id = await lead_for_contact(context, runner, contact_id)
         now = datetime.now(timezone.utc)
+        # WU16 console overlay: settings-driven verdicts via the pure
+        # evaluate() overrides (kill-switch precedence lives in evaluate),
+        # the active prompt row for composition, the calendar config inside
+        # availability, and the allowlist for the transition_lead branch.
+        # Every loader falls back to the code constants, so pre-009 bases
+        # (including the pinned WU15 base) behave exactly as before.
+        settings = await _console_settings_or_default(context, runner)
+        allowed_fields = await _console_allowlist_or_default(context, runner)
+        prompt_text = await _console_prompt_or_default(context, runner)
         try:
             plan = await agent.analyze(context, body, contact_id=contact_id,
-                                       lead_id=lead_id, now=now)
+                                       lead_id=lead_id, now=now,
+                                       auto_types=settings.auto_types,
+                                       calendar_allowed=settings.calendar_allowed,
+                                       system_prompt=prompt_text)
         except InterpretationError:
             return envelope(502, "invalid_model_output",
                             "model response did not match the bounded schema", correlation)
@@ -400,9 +580,19 @@ def build_agent_router(conn_kwargs: dict[str, Any], model_provider: Any | None =
             verdict = (plan.get("policy") or {}).get("verdict")
             indexed = list(enumerate(draft.proposed_actions))
             auto_indexed: list[tuple[int, Any]] | None = None
-            if agent_mode == "auto" and verdict == "auto":
-                auto_indexed = indexed
-            elif (agent_mode == "auto" and verdict == "escalate"
+            # global_auto=FALSE is the master switch: no auto dispatch at
+            # all, while the draft still records its policy_decision above.
+            # The auto branch dispatches only the policy's auto_execute
+            # types, so a narrowed matrix row is honored action by action
+            # (a no-op under the seeded/default overlay).
+            if (settings.global_auto and agent_mode == "auto"
+                    and verdict == "auto"):
+                allowed_types = set((plan.get("policy") or {}).get(
+                    "auto_execute_types") or [a.type for _, a in indexed])
+                auto_indexed = [(i, a) for i, a in indexed
+                                if a.type in allowed_types]
+            elif (settings.global_auto and agent_mode == "auto"
+                    and verdict == "escalate"
                     and draft.intent == "handoff"):
                 # Handoff escalation runs mechanics only (pause + follow-up);
                 # a reply to the lead never dispatches. Original indexes keep
@@ -424,7 +614,8 @@ def build_agent_router(conn_kwargs: dict[str, Any], model_provider: Any | None =
                     account_id=account_id, follow_up_cmd=follow_up_cmd,
                     interest_cmd=interest_cmd, create_event_cmd=create_event_cmd,
                     update_event_cmd=update_event_cmd, reply_cmd=reply_cmd,
-                    mode_cmd=mode_cmd, transition_cmd=transition_cmd)
+                    mode_cmd=mode_cmd, transition_cmd=transition_cmd,
+                    allowed_lead_fields=allowed_fields)
                 try:
                     await finalize_cmd.execute_finalize(
                         context, draft_id=draft.id, execution_result=results,
@@ -556,14 +747,17 @@ def build_agent_router(conn_kwargs: dict[str, Any], model_provider: Any | None =
 
         account_id = context.client_account.id
         # Manual override: the advisor's click dispatches the FULL plan and
-        # never consults the policy.
+        # never consults the policy. The field allowlist still gates the
+        # transition_lead branch (field-level control, not a policy verdict).
+        allowed_fields = await _console_allowlist_or_default(context, runner)
         results = await _dispatch_actions(
             context=context, draft=draft,
             indexed=list(enumerate(draft.proposed_actions)),
             account_id=account_id, follow_up_cmd=follow_up_cmd,
             interest_cmd=interest_cmd, create_event_cmd=create_event_cmd,
             update_event_cmd=update_event_cmd, reply_cmd=reply_cmd,
-            mode_cmd=mode_cmd, transition_cmd=transition_cmd)
+            mode_cmd=mode_cmd, transition_cmd=transition_cmd,
+            allowed_lead_fields=allowed_fields)
 
         try:
             await finalize_cmd.execute_finalize(
@@ -705,5 +899,517 @@ def build_agent_router(conn_kwargs: dict[str, Any], model_provider: Any | None =
             conversation_id=slot["conversation_id"],
             agent_mode=outcome.payload["agent_mode"], account_id=account_id,
             correlation=correlation), headers={"X-Correlation-Id": correlation})
+
+    # --- Agent Console (WU16, additive; state/resume above unchanged) ---
+
+    @router.get(f"{AGENT_PREFIX}/settings")
+    async def get_console_settings(request: Request):
+        correlation = request.state.correlation_id
+        context, error = await _context(request, correlation)
+        if error is not None:
+            return error
+        settings = await _console_settings_or_default(context, runner)
+        return _console_ok(correlation, "settings", {
+            "global_auto": settings.global_auto,
+            "calendar_auto_enabled": settings.calendar_allowed,
+            "matrix": [{"action_type": action,
+                        "verdict": settings.matrix[action]}
+                       for action in sorted(settings.matrix)],
+            "account_id": context.client_account.id,
+        })
+
+    @router.put(f"{AGENT_PREFIX}/settings")
+    async def put_console_settings(request: Request):
+        correlation = request.state.correlation_id
+        context, error = await _context(request, correlation)
+        if error is not None:
+            return error
+        raw, error = await _console_body(request, correlation, _SETTINGS_KEYS)
+        if error is not None:
+            return error
+        account_id = context.client_account.id
+        try:
+            outcome = await settings_cmd.execute_settings(
+                context, global_auto=raw.get("global_auto"),
+                calendar_auto_enabled=raw.get("calendar_auto_enabled"),
+                matrix=raw.get("matrix"),
+                idempotency_key=_console_key(
+                    account_id, "settings", raw,
+                    {"global_auto": raw.get("global_auto"),
+                     "calendar_auto_enabled":
+                         raw.get("calendar_auto_enabled"),
+                     "matrix": raw.get("matrix")}))
+        except CrmCommandDenied as problem:
+            return _denial(problem, correlation)
+        except CrmCommandValidationError as problem:
+            return envelope(400, "invalid_command", str(problem), correlation)
+        except IdempotencyConflict:
+            return envelope(409, "tenant_idempotency_conflict",
+                            "command idempotency conflict", correlation)
+        composition = request.app.state.demo_composition
+        composition.cache.invalidate_scope(context.agency.id, account_id)
+        return _console_ok(correlation, "settings", outcome.payload,
+                           replayed=outcome.replayed)
+
+    @router.get(f"{AGENT_PREFIX}/prompts")
+    async def list_prompts(request: Request):
+        correlation = request.state.correlation_id
+        context, error = await _context(request, correlation)
+        if error is not None:
+            return error
+        try:
+            rows = await runner.query(
+                "SELECT id, version, tone, instructions, composed_snapshot, "
+                "is_active, created_at FROM agent_prompts "
+                "WHERE client_account_id = %s ORDER BY version",
+                (context.client_account.id,),
+            )
+        except Exception:
+            return envelope(404, "resource_not_found",
+                            "resource is not available in this account scope",
+                            correlation)
+        return _console_ok(correlation, "prompts", {
+            "count": len(rows),
+            "items": [{
+                "id": str(row["id"]), "version": row["version"],
+                "tone": row["tone"], "instructions": row["instructions"],
+                "composed_snapshot": row["composed_snapshot"],
+                "is_active": bool(row["is_active"]),
+                "created_at": _iso(row["created_at"]),
+            } for row in rows],
+        })
+
+    @router.post(f"{AGENT_PREFIX}/prompts")
+    async def create_prompt(request: Request):
+        correlation = request.state.correlation_id
+        context, error = await _context(request, correlation)
+        if error is not None:
+            return error
+        raw, error = await _console_body(request, correlation, _PROMPT_KEYS)
+        if error is not None:
+            return error
+        account_id = context.client_account.id
+        try:
+            outcome = await prompt_cmd.execute_create(
+                context, tone=raw.get("tone"),
+                instructions=raw.get("instructions"),
+                idempotency_key=_console_key(
+                    account_id, "prompt", raw,
+                    {"tone": raw.get("tone"),
+                     "instructions": raw.get("instructions")}))
+        except CrmCommandDenied as problem:
+            return _denial(problem, correlation)
+        except CrmCommandValidationError as problem:
+            return envelope(400, "invalid_command", str(problem), correlation)
+        except IdempotencyConflict:
+            return envelope(409, "tenant_idempotency_conflict",
+                            "command idempotency conflict", correlation)
+        composition = request.app.state.demo_composition
+        composition.cache.invalidate_scope(context.agency.id, account_id)
+        return _console_ok(correlation, "prompt", outcome.payload,
+                           replayed=outcome.replayed)
+
+    @router.get(f"{AGENT_PREFIX}/prompts/active")
+    async def get_active_prompt(request: Request):
+        correlation = request.state.correlation_id
+        context, error = await _context(request, correlation)
+        if error is not None:
+            return error
+        try:
+            rows = await runner.query(
+                "SELECT id, version, tone, instructions, composed_snapshot, "
+                "created_at FROM agent_prompts "
+                "WHERE client_account_id = %s AND is_active "
+                "ORDER BY version DESC LIMIT 1",
+                (context.client_account.id,),
+            )
+        except Exception:
+            rows = []
+        if not rows:
+            return envelope(404, "resource_not_found",
+                            "resource is not available in this account scope",
+                            correlation)
+        row = rows[0]
+        return _console_ok(correlation, "prompt", {
+            "id": str(row["id"]), "version": row["version"],
+            "tone": row["tone"], "instructions": row["instructions"],
+            "composed_snapshot": row["composed_snapshot"],
+            "is_active": True, "created_at": _iso(row["created_at"]),
+        })
+
+    @router.get(f"{AGENT_PREFIX}/prompts/composed-preview")
+    async def preview_active_prompt(request: Request):
+        correlation = request.state.correlation_id
+        context, error = await _context(request, correlation)
+        if error is not None:
+            return error
+        try:
+            rows = await runner.query(
+                "SELECT version, tone, instructions FROM agent_prompts "
+                "WHERE client_account_id = %s AND is_active "
+                "ORDER BY version DESC LIMIT 1",
+                (context.client_account.id,),
+            )
+        except Exception:
+            rows = []
+        if not rows:
+            return envelope(404, "resource_not_found",
+                            "resource is not available in this account scope",
+                            correlation)
+        row = rows[0]
+        return _console_ok(correlation, "preview", {
+            "version": row["version"],
+            "composed_text": compose_prompt(
+                row["tone"], row["instructions"] or ""),
+        })
+
+    @router.get(f"{AGENT_PREFIX}/prompts/{{version}}")
+    async def get_prompt_version(request: Request, version: str):
+        correlation = request.state.correlation_id
+        context, error = await _context(request, correlation)
+        if error is not None:
+            return error
+        try:
+            number = int(version)
+        except (TypeError, ValueError):
+            number = -1
+        try:
+            rows = await runner.query(
+                "SELECT id, version, tone, instructions, composed_snapshot, "
+                "is_active, created_at FROM agent_prompts "
+                "WHERE client_account_id = %s AND version = %s",
+                (context.client_account.id, number),
+            )
+        except Exception:
+            rows = []
+        if not rows:
+            return envelope(404, "resource_not_found",
+                            "resource is not available in this account scope",
+                            correlation)
+        row = rows[0]
+        return _console_ok(correlation, "prompt", {
+            "id": str(row["id"]), "version": row["version"],
+            "tone": row["tone"], "instructions": row["instructions"],
+            "composed_snapshot": row["composed_snapshot"],
+            "is_active": bool(row["is_active"]),
+            "created_at": _iso(row["created_at"]),
+        })
+
+    @router.post(f"{AGENT_PREFIX}/prompts/{{version}}/revert")
+    async def revert_prompt(request: Request, version: str):
+        correlation = request.state.correlation_id
+        context, error = await _context(request, correlation)
+        if error is not None:
+            return error
+        raw, error = await _console_body(request, correlation, _REVERT_KEYS)
+        if error is not None:
+            return error
+        try:
+            number = int(version)
+        except (TypeError, ValueError):
+            return envelope(404, "resource_not_found",
+                            "resource is not available in this account scope",
+                            correlation)
+        account_id = context.client_account.id
+        try:
+            outcome = await prompt_cmd.execute_revert(
+                context, version=number,
+                idempotency_key=_console_key(
+                    account_id, "prompt", raw,
+                    {"revert_from": number}))
+        except CrmCommandDenied as problem:
+            return _denial(problem, correlation)
+        except CrmCommandValidationError as problem:
+            return envelope(400, "invalid_command", str(problem), correlation)
+        except IdempotencyConflict:
+            return envelope(409, "tenant_idempotency_conflict",
+                            "command idempotency conflict", correlation)
+        composition = request.app.state.demo_composition
+        composition.cache.invalidate_scope(context.agency.id, account_id)
+        return _console_ok(correlation, "prompt", outcome.payload,
+                           replayed=outcome.replayed)
+
+    @router.get(f"{AGENT_PREFIX}/kb/articles")
+    async def list_kb_articles(request: Request):
+        correlation = request.state.correlation_id
+        context, error = await _context(request, correlation)
+        if error is not None:
+            return error
+        category = request.query_params.get("category")
+        if category is not None and category not in KB_CATEGORIES:
+            return envelope(400, "invalid_command",
+                            "category is invalid", correlation)
+        try:
+            if category is None:
+                rows = await runner.query(
+                    "SELECT id, category, question, keywords, answer, "
+                    "deactivated_at, created_at FROM knowledge_base_articles "
+                    "WHERE client_account_id = %s ORDER BY created_at, id",
+                    (context.client_account.id,),
+                )
+            else:
+                rows = await runner.query(
+                    "SELECT id, category, question, keywords, answer, "
+                    "deactivated_at, created_at FROM knowledge_base_articles "
+                    "WHERE client_account_id = %s AND category = %s "
+                    "ORDER BY created_at, id",
+                    (context.client_account.id, category),
+                )
+        except Exception:
+            return envelope(404, "resource_not_found",
+                            "resource is not available in this account scope",
+                            correlation)
+        return _console_ok(correlation, "articles", {
+            "count": len(rows),
+            "items": [{
+                "id": str(row["id"]), "category": row["category"],
+                "question": row["question"],
+                "keywords": list(row["keywords"] or []),
+                "answer": row["answer"],
+                "deactivated_at": _iso(row["deactivated_at"]),
+                "created_at": _iso(row["created_at"]),
+            } for row in rows],
+        })
+
+    @router.post(f"{AGENT_PREFIX}/kb/articles")
+    async def create_kb_article(request: Request):
+        correlation = request.state.correlation_id
+        context, error = await _context(request, correlation)
+        if error is not None:
+            return error
+        raw, error = await _console_body(request, correlation, _KB_WRITE_KEYS)
+        if error is not None:
+            return error
+        account_id = context.client_account.id
+        try:
+            outcome = await kb_create_cmd.execute_create(
+                context, category=raw.get("category"),
+                question=raw.get("question"), keywords=raw.get("keywords"),
+                answer=raw.get("answer"),
+                idempotency_key=_console_key(
+                    account_id, "kb", raw,
+                    {"category": raw.get("category"),
+                     "question": raw.get("question"),
+                     "keywords": raw.get("keywords"),
+                     "answer": raw.get("answer")}))
+        except CrmCommandDenied as problem:
+            return _denial(problem, correlation)
+        except CrmCommandValidationError as problem:
+            return envelope(400, "invalid_command", str(problem), correlation)
+        except IdempotencyConflict:
+            return envelope(409, "tenant_idempotency_conflict",
+                            "command idempotency conflict", correlation)
+        composition = request.app.state.demo_composition
+        composition.cache.invalidate_scope(context.agency.id, account_id)
+        return _console_ok(correlation, "article", outcome.payload,
+                           replayed=outcome.replayed)
+
+    @router.put(f"{AGENT_PREFIX}/kb/articles/{{article_id}}")
+    async def update_kb_article(request: Request, article_id: str):
+        correlation = request.state.correlation_id
+        context, error = await _context(request, correlation)
+        if error is not None:
+            return error
+        raw, error = await _console_body(request, correlation, _KB_WRITE_KEYS)
+        if error is not None:
+            return error
+        if _uuid_or_none(article_id) is None:
+            return envelope(404, "resource_not_found",
+                            "resource is not available in this account scope",
+                            correlation)
+        account_id = context.client_account.id
+        try:
+            outcome = await kb_update_cmd.execute_update(
+                context, article_id=str(article_id),
+                category=raw.get("category"), question=raw.get("question"),
+                keywords=raw.get("keywords"), answer=raw.get("answer"),
+                idempotency_key=_console_key(
+                    account_id, "kb", raw,
+                    {"article_id": str(article_id),
+                     "category": raw.get("category"),
+                     "question": raw.get("question"),
+                     "keywords": raw.get("keywords"),
+                     "answer": raw.get("answer")}))
+        except CrmCommandDenied as problem:
+            return _denial(problem, correlation)
+        except CrmCommandValidationError as problem:
+            return envelope(400, "invalid_command", str(problem), correlation)
+        except IdempotencyConflict:
+            return envelope(409, "tenant_idempotency_conflict",
+                            "command idempotency conflict", correlation)
+        composition = request.app.state.demo_composition
+        composition.cache.invalidate_scope(context.agency.id, account_id)
+        return _console_ok(correlation, "article", outcome.payload,
+                           replayed=outcome.replayed)
+
+    @router.delete(f"{AGENT_PREFIX}/kb/articles/{{article_id}}")
+    async def deactivate_kb_article(request: Request, article_id: str):
+        correlation = request.state.correlation_id
+        context, error = await _context(request, correlation)
+        if error is not None:
+            return error
+        raw, error = await _console_body(request, correlation,
+                                         _KB_DELETE_KEYS)
+        if error is not None:
+            return error
+        if _uuid_or_none(article_id) is None:
+            return envelope(404, "resource_not_found",
+                            "resource is not available in this account scope",
+                            correlation)
+        account_id = context.client_account.id
+        try:
+            outcome = await kb_deactivate_cmd.execute_deactivate(
+                context, article_id=str(article_id),
+                idempotency_key=_console_key(
+                    account_id, "kb", raw,
+                    {"deactivate": str(article_id)}))
+        except CrmCommandDenied as problem:
+            return _denial(problem, correlation)
+        except CrmCommandValidationError as problem:
+            return envelope(400, "invalid_command", str(problem), correlation)
+        except IdempotencyConflict:
+            return envelope(409, "tenant_idempotency_conflict",
+                            "command idempotency conflict", correlation)
+        composition = request.app.state.demo_composition
+        composition.cache.invalidate_scope(context.agency.id, account_id)
+        return _console_ok(correlation, "article", outcome.payload,
+                           replayed=outcome.replayed)
+
+    @router.post(f"{AGENT_PREFIX}/kb/self-test")
+    async def kb_self_test(request: Request):
+        correlation = request.state.correlation_id
+        context, error = await _context(request, correlation)
+        if error is not None:
+            return error
+        raw, error = await _console_body(request, correlation, _SELFTEST_KEYS)
+        if error is not None:
+            return error
+        question = raw.get("question")
+        if (not isinstance(question, str) or not question.strip()
+                or len(question) > 4000):
+            return envelope(400, "invalid_command",
+                            "question must be a non-empty string",
+                            correlation)
+        question = question.strip()
+        try:
+            match = await kb_repo.find_best_match(context, question)
+        except Exception:
+            return envelope(404, "resource_not_found",
+                            "resource is not available in this account scope",
+                            correlation)
+        if match is None:
+            return _console_ok(correlation, "probe", {"match": False})
+        try:
+            rows = await runner.query(
+                "SELECT keywords FROM knowledge_base_articles "
+                "WHERE id = %s AND client_account_id = %s",
+                (match["id"], context.client_account.id),
+            )
+        except Exception:
+            rows = []
+        keywords = list(rows[0]["keywords"] or []) if rows else []
+        return _console_ok(correlation, "probe", {
+            "match": True,
+            "article": {"id": match["id"], "category": match["category"],
+                        "question": match["question"]},
+            "hits": score_question(keywords, normalize_tokens(question)),
+        })
+
+    @router.get(f"{AGENT_PREFIX}/calendar-config")
+    async def get_calendar_config(request: Request):
+        correlation = request.state.correlation_id
+        context, error = await _context(request, correlation)
+        if error is not None:
+            return error
+        try:
+            config = await load_calendar_config(context, runner)
+        except Exception:
+            config = default_calendar_config()
+        return _console_ok(correlation, "calendar_config", {
+            "window_start": f"{config.start_hour:02d}:00",
+            "window_end": f"{config.end_hour:02d}:00",
+            "slot_minutes": config.slot_minutes,
+            "working_days": sorted(config.working_days),
+            "destination_label": config.destination_label,
+            "account_id": context.client_account.id,
+        })
+
+    @router.put(f"{AGENT_PREFIX}/calendar-config")
+    async def put_calendar_config(request: Request):
+        correlation = request.state.correlation_id
+        context, error = await _context(request, correlation)
+        if error is not None:
+            return error
+        raw, error = await _console_body(request, correlation, _CALENDAR_KEYS)
+        if error is not None:
+            return error
+        account_id = context.client_account.id
+        try:
+            outcome = await calendar_cmd.execute_update(
+                context, window_start=raw.get("window_start"),
+                window_end=raw.get("window_end"),
+                slot_minutes=raw.get("slot_minutes"),
+                working_days=raw.get("working_days"),
+                **({"destination_label": raw.get("destination_label")}
+                   if "destination_label" in raw else {}),
+                idempotency_key=_console_key(
+                    account_id, "calendar", raw,
+                    {"window_start": raw.get("window_start"),
+                     "window_end": raw.get("window_end"),
+                     "slot_minutes": raw.get("slot_minutes"),
+                     "working_days": raw.get("working_days"),
+                     "destination_label": raw.get("destination_label")}))
+        except CrmCommandDenied as problem:
+            return _denial(problem, correlation)
+        except CrmCommandValidationError as problem:
+            return envelope(400, "invalid_command", str(problem), correlation)
+        except IdempotencyConflict:
+            return envelope(409, "tenant_idempotency_conflict",
+                            "command idempotency conflict", correlation)
+        composition = request.app.state.demo_composition
+        composition.cache.invalidate_scope(context.agency.id, account_id)
+        return _console_ok(correlation, "calendar_config", outcome.payload,
+                           replayed=outcome.replayed)
+
+    @router.get(f"{AGENT_PREFIX}/lead-fields")
+    async def get_lead_fields(request: Request):
+        correlation = request.state.correlation_id
+        context, error = await _context(request, correlation)
+        if error is not None:
+            return error
+        allowed = await _console_allowlist_or_default(context, runner)
+        return _console_ok(correlation, "allowlist", {
+            "allowed": sorted(allowed),
+            "account_id": context.client_account.id,
+        })
+
+    @router.put(f"{AGENT_PREFIX}/lead-fields")
+    async def put_lead_fields(request: Request):
+        correlation = request.state.correlation_id
+        context, error = await _context(request, correlation)
+        if error is not None:
+            return error
+        raw, error = await _console_body(request, correlation,
+                                         _ALLOWLIST_KEYS)
+        if error is not None:
+            return error
+        account_id = context.client_account.id
+        try:
+            outcome = await allowlist_cmd.execute_update(
+                context, allowed=raw.get("allowed"),
+                idempotency_key=_console_key(
+                    account_id, "allowlist", raw,
+                    {"allowed": raw.get("allowed")}))
+        except CrmCommandDenied as problem:
+            return _denial(problem, correlation)
+        except CrmCommandValidationError as problem:
+            return envelope(400, "invalid_command", str(problem), correlation)
+        except IdempotencyConflict:
+            return envelope(409, "tenant_idempotency_conflict",
+                            "command idempotency conflict", correlation)
+        composition = request.app.state.demo_composition
+        composition.cache.invalidate_scope(context.agency.id, account_id)
+        return _console_ok(correlation, "allowlist", outcome.payload,
+                           replayed=outcome.replayed)
 
     return router

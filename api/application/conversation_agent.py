@@ -125,14 +125,26 @@ class ConversationAgent:
         self._stage_id_for_name = stage_id_for_name  # (context, lead_id, name) -> stage_id | None
 
     async def analyze(self, context, body: str, *, contact_id: str,
-                      lead_id: str | None, now: datetime) -> dict[str, Any]:
+                      lead_id: str | None, now: datetime,
+                      auto_types: frozenset | None = None,
+                      calendar_allowed: bool | None = None,
+                      system_prompt: str | None = None) -> dict[str, Any]:
         """Produce the bounded draft plan for one inbound message body.
 
         Raises InterpretationError/ProviderError — the caller persists nothing.
         The returned plan carries `policy` (verdict dict) for persistence and
         for the route's auto/escalate decision.
+
+        Additive console overrides (change: agent-console, WU16):
+        `auto_types` / `calendar_allowed` flow straight into the pure
+        `evaluate()` overrides (None late-binds to the module constants, so
+        bare calls behave exactly as before; no new intents); `system_prompt`
+        replaces the composed system text (None/blank falls back to
+        `build_system_prompt()` defaults).
         """
-        raw = await self._model.generate(build_system_prompt(), body)
+        prompt_text = (system_prompt if isinstance(system_prompt, str)
+                       and system_prompt.strip() else build_system_prompt())
+        raw = await self._model.generate(prompt_text, body)
         interp = validate_interpretation(raw)
         intent = interp["intent"]
         criteria = interp["criteria"]
@@ -212,7 +224,9 @@ class ConversationAgent:
             complaint=complaint,
             transition_stage_id=transition_stage_id,
         )
-        decision = evaluate_policy(signals, actions)
+        decision = evaluate_policy(signals, actions,
+                                     auto_types=auto_types,
+                                     calendar_allowed=calendar_allowed)
         return {
             "intent": "handoff" if handoff else intent,
             "criteria": criteria,
