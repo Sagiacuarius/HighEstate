@@ -125,10 +125,17 @@ async def search_properties_for_criteria(context, runner: PostgresRunner,
 
 async def free_slots(context, runner: PostgresRunner, *, from_dt: datetime,
                      to_dt: datetime, exclude_event_id: str | None = None,
-                     tz_name: str | None = None) -> list[tuple[datetime, datetime]]:
-    """Business-hours 60-min slots within [from_dt, to_dt) minus any overlap
+                     tz_name: str | None = None, calendar: Any | None = None
+                     ) -> list[tuple[datetime, datetime]]:
+    """Business-hours slots within [from_dt, to_dt) minus any overlap
     with non-cancelled events (optionally excluding one event id, for the
-    contact's own reschedule target)."""
+    contact's own reschedule target).
+
+    Additive `calendar` config (change: agent-console, WU16): a mapping or
+    object carrying tz_name/start_hour/end_hour/slot_minutes/working_days;
+    None (or absent fields) falls back to the module constants, so bare
+    calls keep the accepted 60-minute behavior exactly.
+    """
     account_id = _require(context)
     events = await CalendarEventRepository(runner).list_in_range(
         context, from_dt=from_dt, to_dt=to_dt, include_cancelled=False)
@@ -137,14 +144,18 @@ async def free_slots(context, runner: PostgresRunner, *, from_dt: datetime,
             and (exclude_event_id is None or e.id != exclude_event_id)]
     from api.domain.calendar_event import BUSINESS_TIMEZONE
     from datetime import date as _date, timedelta
-    tz = _tzinfo(tz_name or BUSINESS_TIMEZONE)
-    step = timedelta(minutes=60)
+    cfg_tz, cfg_start, cfg_end, cfg_slot, cfg_days = _resolve_calendar(calendar)
+    tz = _tzinfo(tz_name or cfg_tz or BUSINESS_TIMEZONE)
+    step = timedelta(minutes=cfg_slot)
     first_day = from_dt.astimezone(tz).date()
     last_day = to_dt.astimezone(tz).date()
     out: list[tuple[datetime, datetime]] = []
     day: _date = first_day
     while day <= last_day:
-        for start_local in business_slot_starts(day, tz_name=tz_name or BUSINESS_TIMEZONE):
+        for start_local in business_slot_starts(
+                day, tz_name=tz_name or cfg_tz or BUSINESS_TIMEZONE,
+                start_hour=cfg_start, end_hour=cfg_end,
+                slot_minutes=cfg_slot, working_days=cfg_days):
             s_utc = start_local.astimezone(_utc())
             e_utc = s_utc + step
             if not (from_dt <= s_utc and e_utc <= to_dt):
@@ -154,6 +165,67 @@ async def free_slots(context, runner: PostgresRunner, *, from_dt: datetime,
             out.append((s_utc, e_utc))
         day += timedelta(days=1)
     return out
+
+
+def _resolve_calendar(calendar: Any | None) -> tuple[Any, Any, Any, Any, Any]:
+    """Resolve (tz_name, start_hour, end_hour, slot_minutes, working_days).
+
+    Accepts None, a mapping (raw config row or dict), or an attribute
+    object (e.g. the console CalendarConfig); every absent/None field falls
+    back to the module constant, so bare calls behave exactly as before.
+    """
+    from api.domain.calendar_event import (
+        BUSINESS_DAYS,
+        BUSINESS_END_HOUR,
+        BUSINESS_START_HOUR,
+        BUSINESS_TIMEZONE,
+        SLOT_MINUTES,
+    )
+    defaults = {
+        "tz_name": BUSINESS_TIMEZONE,
+        "start_hour": BUSINESS_START_HOUR,
+        "end_hour": BUSINESS_END_HOUR,
+        "slot_minutes": SLOT_MINUTES,
+        "working_days": BUSINESS_DAYS,
+    }
+    if calendar is None:
+        return (defaults["tz_name"], defaults["start_hour"], defaults["end_hour"],
+                defaults["slot_minutes"], defaults["working_days"])
+
+    # Raw config rows name the window window_start/window_end; accept both.
+    _KEYS = {"start_hour": ("start_hour", "window_start"),
+             "end_hour": ("end_hour", "window_end")}
+
+    def _raw(name: str) -> Any:
+        if isinstance(calendar, dict):
+            for key in _KEYS.get(name, (name,)):
+                if calendar.get(key) is not None:
+                    return calendar.get(key)
+            return None
+        value = getattr(calendar, name, None)
+        if value is None:
+            for key in _KEYS.get(name, (name,))[1:]:
+                value = getattr(calendar, key, None)
+                if value is not None:
+                    break
+        return value
+
+    def _get(name: str) -> Any:
+        value = _raw(name)
+        # Raw config rows carry the window as "HH:MM" text; accept both.
+        if value is None:
+            return defaults[name]
+        if name in ("start_hour", "end_hour") and isinstance(value, str):
+            try:
+                return int(value.strip().split(":")[0])
+            except (ValueError, IndexError):
+                return defaults[name]
+        if name == "working_days" and isinstance(value, list):
+            return tuple(value)
+        return value
+
+    return (_get("tz_name"), _get("start_hour"), _get("end_hour"),
+            _get("slot_minutes"), _get("working_days"))
 
 
 async def upcoming_event(context, runner: PostgresRunner, *, contact_id: str,

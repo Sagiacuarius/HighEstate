@@ -111,21 +111,38 @@ def _action_types(actions: Iterable[Any]) -> frozenset:
     return frozenset(out)
 
 
-def _effective_auto_types(signals: PolicySignals) -> frozenset:
-    """The AUTO whitelist after kill-switch and transition gating."""
-    effective = set(AUTO_ACTION_TYPES)
-    if not AUTO_EVENT_CREATION:
+def _effective_auto_types(signals: PolicySignals, *, auto_types: frozenset | None = None,
+                          calendar_allowed: bool | None = None) -> frozenset:
+    """The AUTO whitelist after kill-switch and transition gating.
+
+    Keyword-only overrides (change: agent-console, WU16) let the console
+    overlay replace the module constants per account. None (the default)
+    late-binds to the constants at call time, so the accepted kill-switch
+    pin (which flips AUTO_EVENT_CREATION) keeps working; explicit values
+    always win.
+    """
+    if auto_types is None:
+        auto_types = AUTO_ACTION_TYPES
+    if calendar_allowed is None:
+        calendar_allowed = AUTO_EVENT_CREATION
+    effective = set(auto_types)
+    if not calendar_allowed:
         effective -= set(GATED_ACTION_TYPES)
     if not signals.transition_stage_id:
         effective.discard(TRANSITION_ACTION)
     return frozenset(effective)
 
 
-def _auto(reason: str, planned: frozenset, signals: PolicySignals) -> PolicyDecision:
+def _auto(reason: str, planned: frozenset, signals: PolicySignals, *,
+          auto_types: frozenset | None = None,
+          calendar_allowed: bool | None = None) -> PolicyDecision:
     return PolicyDecision(
         verdict="auto",
         reason=reason,
-        auto_execute_types=frozenset(t for t in planned if t in _effective_auto_types(signals)),
+        auto_execute_types=frozenset(
+            t for t in planned
+            if t in _effective_auto_types(signals, auto_types=auto_types,
+                                          calendar_allowed=calendar_allowed)),
         escalation_execute_types=frozenset(),
     )
 
@@ -142,9 +159,25 @@ def _escalate(reason: str, planned: frozenset, *, mechanics: bool = False) -> Po
     )
 
 
-def evaluate(signals: PolicySignals, actions: Iterable[Any]) -> PolicyDecision:
-    """Deterministic verdict over validated signals + planned action types."""
+def evaluate(signals: PolicySignals, actions: Iterable[Any], *,
+             auto_types: frozenset | None = None,
+             calendar_allowed: bool | None = None) -> PolicyDecision:
+    """Deterministic verdict over validated signals + planned action types.
+
+    Keyword-only overrides (change: agent-console, WU16) replace the module
+    constants per account; None (the default) late-binds to the constants
+    at call time (fallback == constants oracle).
+    """
     planned = _action_types(actions)
+    if auto_types is None:
+        auto_types = AUTO_ACTION_TYPES
+    if calendar_allowed is None:
+        calendar_allowed = AUTO_EVENT_CREATION
+    auto_types = frozenset(auto_types)
+
+    def _auto_here(reason: str) -> PolicyDecision:
+        return _auto(reason, planned, signals,
+                     auto_types=auto_types, calendar_allowed=calendar_allowed)
 
     # Handoff dominates everything: escalate, mechanics only, never a reply.
     if signals.intent == HANDOFF_INTENT or signals.handoff_requested:
@@ -158,17 +191,16 @@ def evaluate(signals: PolicySignals, actions: Iterable[Any]) -> PolicyDecision:
         is_visit = signals.intent == "schedule_visit"
         if not signals.slot_found:
             return _escalate("visit_no_slot" if is_visit else "reschedule_no_slot", planned)
-        if not AUTO_EVENT_CREATION and (planned & GATED_ACTION_TYPES):
+        if not calendar_allowed and (planned & GATED_ACTION_TYPES):
             return _escalate("calendar_gated_kill_switch", planned)
-        return _auto("visit_slot_found" if is_visit else "reschedule_slot_found",
-                     planned, signals)
+        return _auto_here("visit_slot_found" if is_visit else "reschedule_slot_found")
 
     # FAQ / price: grounded answers auto-execute; unresolved asks wait.
     if signals.intent == "ask_question":
         if signals.kb_match:
-            return _auto("faq_kb_hit", planned, signals)
+            return _auto_here("faq_kb_hit")
         if signals.price_resolved:
-            return _auto("price_resolved", planned, signals)
+            return _auto_here("price_resolved")
         return _escalate("ask_unresolved", planned)
 
     # Search: matches auto-execute (transition rides along only when its
@@ -176,8 +208,8 @@ def evaluate(signals: PolicySignals, actions: Iterable[Any]) -> PolicyDecision:
     if signals.intent == "search_properties":
         if signals.matched_count >= 1:
             if signals.transition_stage_id and TRANSITION_ACTION in planned:
-                return _auto("search_match_with_transition", planned, signals)
-            return _auto("search_match", planned, signals)
+                return _auto_here("search_match_with_transition")
+            return _auto_here("search_match")
         return _escalate("search_no_match", planned)
 
     if signals.intent == "update_preferences":

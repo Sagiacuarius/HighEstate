@@ -56,7 +56,7 @@ KB_SCORING_SQL = (
     " SELECT a.id, a.category, a.question, a.answer,"
     " cardinality(ARRAY((SELECT unnest(a.keywords) INTERSECT SELECT unnest(%s::text[])))) AS hits"
     " FROM knowledge_base_articles a"
-    " WHERE a.client_account_id = %s"
+    " WHERE a.client_account_id = %s AND a.deactivated_at IS NULL"
     ") SELECT id, category, question, answer FROM scored"
     " WHERE hits > 0"
     " ORDER BY hits DESC, category, id"

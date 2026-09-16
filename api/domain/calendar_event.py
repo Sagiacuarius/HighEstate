@@ -43,21 +43,31 @@ class CalendarEvent:
     updated_at: datetime | None = None
 
 
-def business_slot_starts(day: date, *, tz_name: str = BUSINESS_TIMEZONE) -> list[datetime]:
+def business_slot_starts(day: date, *, tz_name: str = BUSINESS_TIMEZONE,
+                         start_hour: int = BUSINESS_START_HOUR,
+                         end_hour: int = BUSINESS_END_HOUR,
+                         slot_minutes: int = SLOT_MINUTES,
+                         working_days: tuple = BUSINESS_DAYS) -> list[datetime]:
     """Slot start datetimes (timezone-aware, business tz) for one calendar day.
 
-    Returns 09:00, 10:00, ..., 17:00 when the weekday is Mon-Sat, else [].
+    Additive config kwargs (change: agent-console, WU16) default to the
+    module constants, so bare calls keep the accepted behavior exactly:
+    09:00, 10:00, ..., 17:00 when the weekday is Mon-Sat, else [].
     Pure: no I/O, shared by the availability service and the harness oracle.
     """
-    if day.weekday() not in BUSINESS_DAYS:
+    days = set(working_days) if working_days is not None else set(BUSINESS_DAYS)
+    if day.weekday() not in days:
         return []
-    tz = ZoneInfo(tz_name)
+    tz = ZoneInfo(tz_name or BUSINESS_TIMEZONE)
+    start = start_hour if start_hour is not None else BUSINESS_START_HOUR
+    end = end_hour if end_hour is not None else BUSINESS_END_HOUR
+    minutes = slot_minutes if slot_minutes is not None else SLOT_MINUTES
     starts: list[datetime] = []
-    cursor = datetime.combine(day, time(BUSINESS_START_HOUR, 0), tzinfo=tz)
-    end = datetime.combine(day, time(BUSINESS_END_HOUR, 0), tzinfo=tz)
-    step = timedelta(minutes=SLOT_MINUTES)
+    cursor = datetime.combine(day, time(start, 0), tzinfo=tz)
+    limit = datetime.combine(day, time(end, 0), tzinfo=tz)
+    step = timedelta(minutes=minutes)
     # the last slot STARTS at (END - SLOT); a slot starting at END is empty.
-    while cursor + step <= end:
+    while cursor + step <= limit:
         starts.append(cursor)
         cursor += step
     return starts

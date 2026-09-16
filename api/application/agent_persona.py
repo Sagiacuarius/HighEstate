@@ -64,14 +64,31 @@ Reglas:
 """
 
 
-def build_system_prompt() -> str:
-    return _SYSTEM_TEMPLATE.format(
+def compose_prompt(tone: str = AGENT_TONE, instructions: str = "") -> str:
+    """Pure composer for the system prompt (change: agent-console, WU16).
+
+    The skeleton (identity, role, language, guardrails, template structure)
+    is code-only: there is deliberately no skeleton parameter anywhere.
+    Empty/whitespace tone fails closed to AGENT_TONE; empty instructions
+    leave the text byte-identical to the accepted default.
+    """
+    effective_tone = tone if isinstance(tone, str) and tone.strip() else AGENT_TONE
+    text = _SYSTEM_TEMPLATE.format(
         identity=AGENT_IDENTITY,
         role=AGENT_ROLE,
-        tone=AGENT_TONE,
+        tone=effective_tone,
         language=AGENT_LANGUAGE,
         guardrails=AGENT_GUARDRAILS,
     )
+    extra = instructions if isinstance(instructions, str) else ""
+    if extra.strip():
+        text += f"\nInstrucciones adicionales del asesor: {extra.strip()}\n"
+    return text
+
+
+def build_system_prompt(*, tone: str = AGENT_TONE, instructions: str = "") -> str:
+    """Accepted default voice: call with no overrides for byte-identical text."""
+    return compose_prompt(tone, instructions)
 
 
 _ANSWER_TEMPLATE = """\
