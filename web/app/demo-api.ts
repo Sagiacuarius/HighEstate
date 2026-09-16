@@ -16,6 +16,9 @@ import {
   type RuntimeHttpClientOptions,
 } from "../runtime-client";
 import {
+  parseAgentDraftsResponse,
+  parseAgentDraftResponse,
+  parseAgentDraftCommandResponse,
   parseAvailabilityResponse,
   parseCalendarCommandResponse,
   parseCalendarEventsResponse,
@@ -31,6 +34,9 @@ import {
   parseDemoContextResponse,
   parseDemoControlsResponse,
   parseDemoSimulateResponse,
+  type AgentDraftsResponse,
+  type AgentDraftResponse,
+  type AgentDraftCommandResponse,
   type AvailabilityResponse,
   type CalendarCommandResponse,
   type CalendarEventsResponse,
@@ -91,6 +97,11 @@ export type DemoApi = {
                        options?: RuntimeHttpCallOptions) => Promise<CalendarCommandResponse>;
   cancelCalendarEvent: (eventId: string, idempotencyKey?: string,
                         options?: RuntimeHttpCallOptions) => Promise<CalendarCommandResponse>;
+  agentDrafts: (conversationId?: string, options?: RuntimeHttpCallOptions) => Promise<AgentDraftsResponse>;
+  agentDraft: (draftId: string, options?: RuntimeHttpCallOptions) => Promise<AgentDraftResponse>;
+  analyzeMessage: (body: string, options?: RuntimeHttpCallOptions) => Promise<AgentDraftCommandResponse>;
+  approveDraft: (draftId: string, options?: RuntimeHttpCallOptions) => Promise<AgentDraftCommandResponse>;
+  rejectDraft: (draftId: string, options?: RuntimeHttpCallOptions) => Promise<AgentDraftCommandResponse>;
 };
 
 export type DemoApiFetcher = NonNullable<RuntimeHttpClientOptions["fetcher"]>;
@@ -146,6 +157,20 @@ export function createDemoApi(baseUrl: string, fetcher?: DemoApiFetcher): DemoAp
       const query = params.toString() ? `?${params.toString()}` : "";
       return runtime.delete(`/v1/demo/calendar/events/${encodeURIComponent(eventId)}${query}`, options ?? {}, parseCalendarCommandResponse);
     },
+    agentDrafts: (conversationId, options) => {
+      const params = new URLSearchParams();
+      if (conversationId?.trim()) params.set("conversation_id", conversationId.trim());
+      const query = params.toString() ? `?${params.toString()}` : "";
+      return runtime.get(`/v1/demo/agent/drafts${query}`, options ?? {}, parseAgentDraftsResponse);
+    },
+    agentDraft: (draftId, options) =>
+      runtime.get(`/v1/demo/agent/drafts/${encodeURIComponent(draftId)}`, options ?? {}, parseAgentDraftResponse),
+    analyzeMessage: (body, options) =>
+      runtime.post("/v1/demo/agent/analyze", { body }, options ?? {}, parseAgentDraftCommandResponse),
+    approveDraft: (draftId, options) =>
+      runtime.post(`/v1/demo/agent/drafts/${encodeURIComponent(draftId)}/approve`, {}, options ?? {}, parseAgentDraftCommandResponse),
+    rejectDraft: (draftId, options) =>
+      runtime.post(`/v1/demo/agent/drafts/${encodeURIComponent(draftId)}/reject`, {}, options ?? {}, parseAgentDraftCommandResponse),
   };
 }
 
@@ -236,4 +261,69 @@ export function buildAuditQuery(filters: AuditFilterState): string {
   }
   const query = params.toString();
   return query ? `?${query}` : "";
+}
+
+/* --- WU14 conversational agent helpers (pure, unit-tested) --- */
+
+/** Spanish labels for the bounded agent vocabulary (server stays language-neutral). */
+export const INTENT_LABELS: Record<string, string> = {
+  search_properties: "Búsqueda de propiedades",
+  schedule_visit: "Pedido de visita",
+  reschedule: "Reprogramar visita",
+  ask_question: "Consulta",
+  update_preferences: "Actualizar preferencias",
+  general: "General",
+};
+
+export const ACTION_LABELS: Record<string, string> = {
+  create_event: "Crear evento en el calendario",
+  reschedule_event: "Reprogramar evento",
+  register_interest: "Registrar interés en propiedad",
+  create_follow_up: "Crear seguimiento",
+  transition_lead: "Avanzar prospecto de etapa",
+};
+
+const CRITERIA_VALUE_LABELS: Record<string, Record<string, string>> = {
+  operation_type: { sale: "venta", rent: "alquiler", temporary_rent: "temporario" },
+  property_type: {
+    apartment: "departamento", house: "casa", ph: "PH", land: "terreno",
+    office: "oficina", commercial: "local", warehouse: "depósito",
+  },
+};
+
+/** Criteria chips for a draft card, e.g. "alquiler · Rosario · hasta 150.000". */
+export function describeCriteria(criteria: Record<string, unknown>): string[] {
+  const chips: string[] = [];
+  const op = criteria.operation_type;
+  if (typeof op === "string") chips.push(CRITERIA_VALUE_LABELS.operation_type[op] ?? op);
+  const pt = criteria.property_type;
+  if (typeof pt === "string") chips.push(CRITERIA_VALUE_LABELS.property_type[pt] ?? pt);
+  if (typeof criteria.city === "string" && criteria.city.trim()) chips.push(criteria.city.trim());
+  const budget = criteria.budget_max;
+  if (typeof budget === "number" && Number.isFinite(budget)) {
+    chips.push(`hasta ${budget.toLocaleString("en-US")}`);
+  }
+  const rooms = criteria.rooms_min;
+  if (typeof rooms === "number") chips.push(`${rooms} ambiente${rooms === 1 ? "" : "s"}`);
+  const baths = criteria.bathrooms_min;
+  if (typeof baths === "number") chips.push(`${baths} baño${baths === 1 ? "" : "s"}`);
+  if (criteria.parking === true) chips.push("cochera");
+  const date = criteria.preferred_date;
+  const time = criteria.preferred_time;
+  if (typeof date === "string") {
+    chips.push(typeof time === "string" ? `visita ${date} ${time}` : `visita ${date}`);
+  }
+  return chips;
+}
+
+/** One-line summary of an executed draft's saga outcome, e.g. "2 aplicadas · 1 denegada". */
+export function describeExecution(result: Array<Record<string, unknown>> | null): string | null {
+  if (!result || result.length === 0) return null;
+  const applied = result.filter((e) => e.outcome === "success" || e.outcome === "replayed").length;
+  const denied = result.filter((e) => e.outcome === "denied" || e.outcome === "conflict"
+    || e.outcome === "invalid" || e.outcome === "unsupported").length;
+  const parts: string[] = [];
+  if (applied > 0) parts.push(`${applied} aplicada${applied === 1 ? "" : "s"}`);
+  if (denied > 0) parts.push(`${denied} sin aplicar`);
+  return parts.join(" · ");
 }

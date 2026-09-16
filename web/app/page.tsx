@@ -19,11 +19,16 @@ import {
   initials,
   isResetBlockedError,
   unreadTotal,
+  INTENT_LABELS,
+  ACTION_LABELS,
+  describeCriteria,
+  describeExecution,
   type AuditFilterState,
   type DemoApi,
 } from "./demo-api";
 import { RuntimeHttpError } from "../runtime-client";
 import type {
+  AgentDraft,
   CrmInboxItem,
   DemoContextResponse,
 } from "../../contracts/runtime-v1";
@@ -99,9 +104,17 @@ const STATUS_LABELS: Record<string, string> = {
   authorization_denied: "Acceso denegado",
   // WU13 (calendar-agenda): estados de eventos y acciones del audit.
   scheduled: "Programado",
-  "calendar.create": "Evento creado",
-  "calendar.update": "Evento actualizado",
-  "calendar.cancel": "Evento cancelado",
+  "crm.calendar.create": "Evento creado",
+  "crm.calendar.update": "Evento actualizado",
+  "crm.calendar.cancel": "Evento cancelado",
+  // WU14 (conversational agent): estados de borrador y acciones del audit.
+  proposed: "Propuesto",
+  approved: "Aprobado",
+  rejected: "Rechazado",
+  executed: "Ejecutado",
+  "crm.agent.analyze": "Análisis del agente",
+  "crm.agent.decide": "Decisión del agente",
+  "crm.agent.execute": "Borrador ejecutado",
 };
 
 function statusLabel(value: string): string {
@@ -152,6 +165,15 @@ export default function DashboardPage(): React.ReactElement {
   const [auditError, setAuditError] = React.useState<string | null>(null);
   const [auditFilters, setAuditFilters] = React.useState<AuditFilterState>({});
   const [auditLoading, setAuditLoading] = React.useState(false);
+  // WU14 conversational agent: draft cards live inline in the conversation
+  // thread; decisions re-run the account reads because they mutate CRM data.
+  const [drafts, setDrafts] = React.useState<AgentDraft[]>([]);
+  const [draftsError, setDraftsError] = React.useState<string | null>(null);
+  const [draftsLoading, setDraftsLoading] = React.useState(false);
+  const [agentBody, setAgentBody] = React.useState("");
+  const [agentNote, setAgentNote] = React.useState<string | null>(null);
+  const [analyzing, setAnalyzing] = React.useState(false);
+  const [decisionBusy, setDecisionBusy] = React.useState<string | null>(null);
 
   const reload = React.useCallback(
     async (client: DemoApi) => {
@@ -409,7 +431,10 @@ export default function DashboardPage(): React.ReactElement {
       setAccount(resolved);
       setSelectedConversation(null);
       setThread(null);
+      setDrafts([]);
+      setAgentNote(null);
       await reload(api);
+      await loadDrafts(api, null);
     } catch (error) {
       setViewErrors((prev) => ({ ...prev, cuenta: errorText(error) }));
     } finally {
@@ -426,6 +451,78 @@ export default function DashboardPage(): React.ReactElement {
     } catch (error) {
       setThreadError(errorText(error));
       setThread(null);
+    }
+    await loadDrafts(api, item.conversation_id);
+  };
+
+  const loadDrafts = React.useCallback(async (client: DemoApi, conversationId: string | null): Promise<void> => {
+    setDraftsLoading(true);
+    setDraftsError(null);
+    try {
+      const page = await client.agentDrafts(conversationId ?? undefined);
+      setDrafts(page.items);
+    } catch (error) {
+      const correlation = error instanceof RuntimeHttpError
+        ? ` · ${error.envelope.error.correlation_id}` : "";
+      setDraftsError(`${errorText(error)}${correlation}`);
+      setDrafts([]);
+    } finally {
+      setDraftsLoading(false);
+    }
+  }, []);
+
+  React.useEffect(() => {
+    if (!api) return;
+    void loadDrafts(api, null);
+  }, [api, account?.client_account_id, loadDrafts]);
+
+  const runAnalyze = async (): Promise<void> => {
+    if (!api || analyzing) return;
+    const lastInbound = thread
+      ? [...thread.items].reverse().find((m) => m.direction === "inbound")?.body ?? ""
+      : "";
+    const body = (agentBody.trim() || lastInbound).trim();
+    if (!body) {
+      setAgentNote("Escribí un mensaje del lead (o simulá uno) antes de analizar.");
+      return;
+    }
+    setAnalyzing(true);
+    setAgentNote(null);
+    try {
+      const result = await api.analyzeMessage(body);
+      setAgentNote(result.replayed
+        ? "Borrador ya existía para este mensaje (repetición)"
+        : "Borrador propuesto — revisalo y aprobalo o rechazalo");
+      setAgentBody("");
+      await loadDrafts(api, selectedConversation);
+    } catch (error) {
+      const correlation = error instanceof RuntimeHttpError
+        ? ` · ${error.envelope.error.correlation_id}` : "";
+      setAgentNote(`Análisis falló: ${errorText(error)}${correlation}`);
+    } finally {
+      setAnalyzing(false);
+    }
+  };
+
+  const runDecide = async (draft: AgentDraft, approve: boolean): Promise<void> => {
+    if (!api || decisionBusy) return;
+    setDecisionBusy(draft.draft_id);
+    setAgentNote(null);
+    try {
+      const result = approve
+        ? await api.approveDraft(draft.draft_id)
+        : await api.rejectDraft(draft.draft_id);
+      setAgentNote(approve
+        ? `Borrador ejecutado · ${describeExecution(result.draft.execution_result) ?? "sin acciones"}`
+        : "Borrador rechazado — nada se aplicó");
+      await loadDrafts(api, selectedConversation);
+      // The approved actions mutate CRM data (follow-ups, events, interests):
+      // refresh the account reads so the badges stay DB-derived.
+      await reload(api);
+    } catch (error) {
+      setAgentNote(`Decisión falló: ${errorText(error)}`);
+    } finally {
+      setDecisionBusy(null);
     }
   };
 
@@ -655,6 +752,65 @@ export default function DashboardPage(): React.ReactElement {
                       ))}
                     </div>
                   ) : null}
+                  <div className="agent-block">
+                    <div className="panel-heading"><div><p className="eyebrow">Agente · borradores a confirmar</p><h2>Asistente de {account ? account.client_account_name : "…"}</h2></div></div>
+                    <p className="empty-note">El agente lee el mensaje, busca propiedades y sugiere una franja libre. Nada se aplica hasta que apruebes el borrador.</p>
+                    <div className="agent-analyze">
+                      <textarea
+                        value={agentBody}
+                        onChange={(e) => setAgentBody(e.target.value)}
+                        rows={2}
+                        placeholder="Escribí el mensaje del lead (o dejá vacío y usá el último entrante del hilo), luego Analizar."
+                      />
+                      <button className="ghost-btn" onClick={() => void runAnalyze()} disabled={analyzing || draftsLoading}>
+                        {analyzing ? "Analizando…" : "Analizar con el agente"}
+                      </button>
+                    </div>
+                    {draftsError ? <p className="empty-note"><code>{draftsError}</code></p> : null}
+                    {agentNote ? <p className="empty-note">{agentNote}</p> : null}
+                    {draftsLoading ? <p className="empty-note">Cargando borradores…</p> : null}
+                    {!draftsLoading && drafts.length === 0 ? <p className="empty-note">Todavía no hay borradores en esta conversación.</p> : null}
+                    {drafts.map((draft) => {
+                      const chips = describeCriteria(draft.criteria);
+                      const summary = describeExecution(draft.execution_result);
+                      return (
+                        <div className="agent-draft-card" key={draft.draft_id}>
+                          <div className="agent-draft-head">
+                            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                              <span className="avatar violet">AI</span>
+                              <div><strong>{INTENT_LABELS[draft.intent] ?? draft.intent}</strong>
+                                <div className="mono" style={{ fontSize: 13 }}>{draft.model_provider} · {draft.model_name}</div>
+                              </div>
+                            </div>
+                            <span className={pillFor(draft.status)}>{statusLabel(draft.status)}</span>
+                          </div>
+                          {chips.length > 0 ? <div className="agent-chips">{chips.map((c) => <span className="soft" key={c}>{c}</span>)}</div> : null}
+                          {draft.matched_property_ids.length > 0 ? (
+                            <div className="agent-chips">
+                              {draft.matched_property_ids.map((pid) => <span className="mono" key={pid}>propiedad {pid.slice(0, 8)}…</span>)}
+                            </div>
+                          ) : null}
+                          <ul className="agent-actions">
+                            {draft.proposed_actions.map((action, i) => (
+                              <li key={`${draft.draft_id}-${i}`}>
+                                {ACTION_LABELS[action.type] ?? action.type}
+                                {typeof action.params.title === "string" ? <> · {action.params.title}</> : null}
+                                {typeof action.params.starts_at === "string" ? <> · {formatDayUtc(action.params.starts_at)} {formatTimeUtc(action.params.starts_at)} UTC</> : null}
+                              </li>
+                            ))}
+                          </ul>
+                          {draft.reply_text ? <p className="agent-reply">“{draft.reply_text}”</p> : null}
+                          {summary ? <p className="empty-note">Ejecución: {summary}</p> : null}
+                          {draft.status === "proposed" ? (
+                            <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+                              <button className="ghost-btn" disabled={decisionBusy !== null} onClick={() => void runDecide(draft, true)}>Aprobar</button>
+                              <button className="ghost-btn danger" disabled={decisionBusy !== null} onClick={() => void runDecide(draft, false)}>Rechazar</button>
+                            </div>
+                          ) : null}
+                        </div>
+                      );
+                    })}
+                  </div>
                 </section>
               </div>
             ) : null}

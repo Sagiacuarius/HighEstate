@@ -439,3 +439,17 @@ body{
 .calendar-inline-form input{background:rgba(10,24,38,.6);border:1px solid rgba(148,178,208,.3);border-radius:6px;color:var(--slate-50);font-size:12px;padding:5px 6px;width:100%}
 .calendar-inline-row{display:flex;gap:4px}
 .calendar-inline-row button{flex:1}
+
+/* --- WU14 conversational agent: inline draft cards in the thread. --- */
+.agent-block{margin-top:14px;border-top:1px solid var(--glass-border);padding-top:14px}
+.agent-analyze{display:flex;gap:8px;align-items:flex-start;margin:10px 0}
+.agent-analyze textarea{flex:1;background:rgba(10,24,38,.5);border:1px solid rgba(148,178,208,.25);border-radius:8px;color:var(--slate-50);font:14px Inter,system-ui,sans-serif;padding:8px 10px;resize:vertical}
+.agent-analyze button{white-space:nowrap}
+.agent-draft-card{border:1px solid var(--glass-border);border-radius:12px;padding:12px;background:rgba(22,50,77,.4);margin:10px 0}
+.agent-draft-head{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:8px}
+.agent-chips{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0}
+.agent-chips .soft,.agent-chips .mono{font-size:12px;border-radius:5px;padding:3px 8px;background:rgba(255,255,255,.06);color:var(--slate-100)}
+.agent-chips .mono{font-family:'IBM Plex Mono',monospace;background:transparent;color:var(--navy-100)}
+.agent-actions{margin:8px 0;padding-left:18px;color:var(--slate-100);font-size:14px}
+.agent-actions li{margin:2px 0}
+.agent-reply{color:var(--ember-100);font-size:14px;margin:8px 0 0}
