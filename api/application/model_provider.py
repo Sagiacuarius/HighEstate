@@ -1,13 +1,19 @@
 """ModelProvider port + adapters (WU14).
 
 The single blast-radius boundary between the LLM and the system: a provider
-receives (system, user) text and returns raw JSON to be schema-validated. It
+receives (system, user) text and returns the schema-validated interpretation. It
 never sees the DB, context objects, or write paths.
 
 Adapters:
-- OpenCodeGoProvider: OpenAI-compatible chat completions against the
-  opencode-go gateway (https://opencode.ai/zen/go/v1/chat/completions),
-  Bearer OPENCODE_GO_API_KEY, JSON response mode, temperature 0.
+- OpenCodeGoProvider: LangChain-backed transport (`langchain_openai.ChatOpenAI`
+  built lazily inside the class) against the opencode-go gateway
+  (https://opencode.ai/zen/go/v1, `/chat/completions` appended by the
+  OpenAI-compatible client), api_key OPENCODE_GO_API_KEY, JSON response mode,
+  temperature 0. The module top-level stays langchain-free so the stub path
+  never imports it. Interpretation = RunnableSequence `chat_prompt | llm`,
+  content string -> json.loads -> the unchanged `validate_interpretation`
+  still gating everything; FAQ tone composition = `answer_prompt | llm |
+  StrOutputParser`, bounded before persistence.
 - StubModelProvider: deterministic keyword classifier (no network). Used by
   the tests and as the automatic fallback when the API key is absent.
 
@@ -25,7 +31,8 @@ from typing import Any, Protocol
 from api.domain.agent_draft import CRITERIA_KEYS, INTENTS
 from api.domain.property_catalog import OPERATION_TYPES_V11, PROPERTY_TYPES
 
-ZEN_GO_CHAT_URL = "https://opencode.ai/zen/go/v1/chat/completions"
+ZEN_GO_BASE_URL = "https://opencode.ai/zen/go/v1"
+ZEN_GO_CHAT_URL = ZEN_GO_BASE_URL + "/chat/completions"
 DEFAULT_GO_MODEL = "deepseek-v4-pro"
 API_KEY_ENV = "OPENCODE_GO_API_KEY"
 
@@ -132,7 +139,13 @@ def validate_interpretation(raw: Any) -> dict[str, Any]:
 
 
 class OpenCodeGoProvider:
-    """OpenAI-compatible chat completions against the opencode-go gateway."""
+    """LangChain-backed interpretation against the opencode-go gateway.
+
+    Transport only: `chat_prompt | llm` (RunnableSequence) returns the raw
+    model content string; `json.loads` + `validate_interpretation` still gate
+    everything fail-closed. The langchain imports live inside the methods so
+    the module top-level (and the stub path) never imports langchain.
+    """
 
     name = "opencode-go"
 
@@ -142,32 +155,75 @@ class OpenCodeGoProvider:
         self.model = model
         self._timeout = timeout_seconds
 
-    async def generate(self, system: str, user: str) -> Any:
-        import httpx
+    def _llm(self):
+        """Lazily built ChatOpenAI (keeps the module top-level langchain-free)."""
+        from langchain_openai import ChatOpenAI
 
-        payload = {
-            "model": self.model,
-            "temperature": 0,
-            "response_format": {"type": "json_object"},
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-        }
-        headers = {"Authorization": f"Bearer {self._api_key}"}
+        return ChatOpenAI(
+            model=self.model,
+            api_key=self._api_key,
+            base_url=ZEN_GO_BASE_URL,
+            temperature=0,
+            model_kwargs={"response_format": {"type": "json_object"}},
+            request_timeout=self._timeout,
+        )
+
+    def _interpretation_chain(self):
+        """RunnableSequence `chat_prompt | llm` for the bounded interpretation."""
+        from langchain_core.prompts import ChatPromptTemplate
+
+        chat_prompt = ChatPromptTemplate.from_messages([
+            ("system", "{system}"),
+            ("human", "{user}"),
+        ])
+        return chat_prompt | self._llm()
+
+    async def generate(self, system: str, user: str) -> Any:
+        chain = self._interpretation_chain()
         try:
-            async with httpx.AsyncClient(timeout=self._timeout) as client:
-                response = await client.post(ZEN_GO_CHAT_URL, json=payload, headers=headers)
+            message = await chain.ainvoke({"system": system, "user": user})
         except Exception as error:  # network/timeout: typed, no detail leak
             raise ProviderError(f"provider request failed: {type(error).__name__}") from error
-        if response.status_code != 200:
-            raise ProviderError(f"provider returned HTTP {response.status_code}")
         try:
-            data = response.json()
-            content = data["choices"][0]["message"]["content"]
-            return json.loads(content)
+            content = message.content
+            if isinstance(content, list):  # content blocks: join text parts
+                content = "".join(
+                    part.get("text", "") if isinstance(part, dict)
+                    else str(getattr(part, "text", part))
+                    for part in content
+                )
+            raw = json.loads(content)
         except Exception as error:
             raise ProviderError("provider response is not valid JSON content") from error
+        # InterpretationError propagates fail-closed (schema unchanged).
+        return validate_interpretation(raw)
+
+    async def compose_answer(self, *, ground_text: str, user_question: str) -> str:
+        """FAQ tone composition over grounded text only.
+
+        `answer_prompt | llm | StrOutputParser`; the result is bounded
+        (non-empty, max 2000 chars) before the caller may persist it.
+        """
+        from langchain_core.output_parsers import StrOutputParser
+        from langchain_core.prompts import ChatPromptTemplate
+
+        answer_prompt = ChatPromptTemplate.from_messages([
+            ("system",
+             "You compose a short customer reply in Rioplatense Spanish using "
+             "only the grounded context below. Never invent facts outside the "
+             "context. Keep it under 2000 characters."),
+            ("human", "Context:\n{context}\n\nQuestion:\n{question}"),
+        ])
+        chain = answer_prompt | self._llm() | StrOutputParser()
+        try:
+            text = await chain.ainvoke({"context": ground_text,
+                                        "question": user_question})
+        except Exception as error:  # network/timeout: typed, no detail leak
+            raise ProviderError(f"provider request failed: {type(error).__name__}") from error
+        text = text.strip() if isinstance(text, str) else str(text).strip()
+        if not text or len(text) > 2000:
+            raise ProviderError("provider answer out of bounds")
+        return text
 
 
 # --- deterministic stub ------------------------------------------------------

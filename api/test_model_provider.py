@@ -8,10 +8,13 @@ deterministically and its own output validates; the persona renders.
 from __future__ import annotations
 
 import asyncio
+import sys
 
 from api.application.agent_persona import build_system_prompt
 from api.application.model_provider import (
     InterpretationError,
+    OpenCodeGoProvider,
+    ProviderError,
     StubModelProvider,
     validate_interpretation,
 )
@@ -98,6 +101,50 @@ def run_all() -> list[tuple[str, bool, str]]:
     prompt = build_system_prompt()
     record("U8 persona renders (Sofía + JSON contract)",
            "Sofía" in prompt and '"intent"' in prompt and len(prompt) > 200)
+
+    # U9. stub-only path never imports the LangChain transport (offline demo
+    # stays honest: no key, no network, no langchain import).
+    record("U9 stub runs import no langchain_openai transport",
+           "langchain_openai" not in sys.modules,
+           f"present={'langchain_openai' in sys.modules}")
+
+    # U10. chain failures fail closed (faked chain: no network, no langchain
+    # import here either): transport errors -> ProviderError, schema-violating
+    # model output -> InterpretationError.
+    provider = OpenCodeGoProvider(api_key="test-key")
+
+    class _TransportBoom:
+        async def ainvoke(self, _inputs):
+            raise RuntimeError("boom")
+
+    class _BadSchemaMessage:
+        content = ('{"intent": "hack_the_planet", "criteria": {}, '
+                   '"reply_text": "x"}')
+
+    class _BadSchemaChain:
+        async def ainvoke(self, _inputs):
+            return _BadSchemaMessage()
+
+    provider._interpretation_chain = lambda: _TransportBoom()  # type: ignore[method-assign]
+    try:
+        asyncio.run(provider.generate("sys", "hola"))
+        transport_ok, transport_detail = False, "no error raised"
+    except ProviderError:
+        transport_ok, transport_detail = True, "ProviderError"
+    except Exception as error:
+        transport_ok, transport_detail = False, f"wrong={type(error).__name__}"
+    provider._interpretation_chain = lambda: _BadSchemaChain()  # type: ignore[method-assign]
+    try:
+        asyncio.run(provider.generate("sys", "hola"))
+        schema_ok, schema_detail = False, "no error raised"
+    except InterpretationError:
+        schema_ok, schema_detail = True, "InterpretationError"
+    except Exception as error:
+        schema_ok, schema_detail = False, f"wrong={type(error).__name__}"
+    record("U10 chain failure fail-closed (transport->ProviderError, "
+           "bad schema->InterpretationError)",
+           transport_ok and schema_ok,
+           f"transport={transport_detail} schema={schema_detail}")
 
     return results
 
