@@ -1,7 +1,7 @@
 """MVP Commercial Demo WU9: dev-only simulator endpoint + blocked-reset resolution.
 
 Runs against production_runtime_mvp_wu9 (disposable database: migrations
-001-004 + deterministic mvp_seed). Never touches earlier accepted bases.
+001-009 + deterministic mvp_seed). Never touches earlier accepted bases.
 
 Covers: canonical payload through the labeled /v1/demo/simulate surface over
 composition WU8 (selector-governed session), full durable effect (message +

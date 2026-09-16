@@ -537,7 +537,7 @@ describe("agent console contracts (WU16)", () => {
     expect(() => parseKbArticlesResponse(
       consoleEnvelope("articles", { count: 1, items: [kbFixture({ category: "cohetes" })] }))).toThrow(/category/);
     expect(() => parseKbArticleResponse(consoleEnvelope("article", kbFixture({ rogue: 1 })))).toThrow(/unknown key/);
-    expect(() => parseKbSelfTestResponse(consoleEnvelope("probe", { match: true })))).toThrow();
+    expect(() => parseKbSelfTestResponse(consoleEnvelope("probe", { match: true }))).toThrow();
     expect(() => parseCalendarConfigResponse(consoleEnvelope("calendar_config", {
       window_start: "18:00", window_end: "09:00", slot_minutes: 0,
       working_days: [7], destination_label: null, account_id: "a",

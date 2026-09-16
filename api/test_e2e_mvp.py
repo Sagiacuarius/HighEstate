@@ -1,6 +1,6 @@
 """MVP Commercial Demo WU10: full-loop PostgreSQL E2E harness (final unit).
 
-Runs against production_runtime_mvp_wu10 (disposable database: runner 001-004
+Runs against production_runtime_mvp_wu10 (disposable database: runner 001-009
 + mvp_seed). Never touches earlier accepted bases.
 
 The journey reuses the accepted harness units as building blocks rather than

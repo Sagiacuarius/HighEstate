@@ -1,7 +1,7 @@
 """Agent autonomy (change: agent-autonomy, WU15) real-PostgreSQL harness.
 
-Runs against production_runtime_mvp_wu15 (disposable: runner 001-008 +
-mvp_seed.sql + mvp_seed_005.sql + mvp_seed_008.sql) with the StubModelProvider
+Runs against production_runtime_mvp_wu15 (disposable: runner 001-009 +
+mvp_seed.sql + mvp_seed_005.sql + mvp_seed_008.sql + mvp_seed_009.sql) with the StubModelProvider
 (no network, no API key, no langchain import). The 008 seed flips the two demo
 conversations to `auto`; setup re-pins `auto` explicitly via the dev-only
 state endpoint (earlier WU14 runs may have left `manual` behind).
@@ -55,7 +55,8 @@ from api.routes.simulator_wu9 import SIMULATE_PATH
 ROOT = Path(__file__).resolve().parent.parent
 SEED_FILES = [ROOT / "infra" / "migrations" / "validation" / "mvp_seed.sql",
               ROOT / "infra" / "migrations" / "validation" / "mvp_seed_005.sql",
-              ROOT / "infra" / "migrations" / "validation" / "mvp_seed_008.sql"]
+              ROOT / "infra" / "migrations" / "validation" / "mvp_seed_008.sql",
+              ROOT / "infra" / "migrations" / "validation" / "mvp_seed_009.sql"]
 
 ACCOUNT_A = "20000000-0000-0000-0000-000000000001"
 ACCOUNT_B = "20000000-0000-0000-0000-000000000002"

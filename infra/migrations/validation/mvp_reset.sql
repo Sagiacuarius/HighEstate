@@ -26,7 +26,8 @@ DELETE FROM follow_ups WHERE (client_account_id, demo_seed_key) IN (
 DELETE FROM leads WHERE (client_account_id, demo_seed_key) IN (
   ('20000000-0000-0000-0000-000000000001', 'demo-a-lead-001'), ('20000000-0000-0000-0000-000000000002', 'demo-b-lead-001'));
 DELETE FROM pipeline_stages WHERE (client_account_id, demo_seed_key) IN (
-  ('20000000-0000-0000-0000-000000000001', 'demo-a-stage-001'), ('20000000-0000-0000-0000-000000000002', 'demo-b-stage-001'));
+  ('20000000-0000-0000-0000-000000000001', 'demo-a-stage-001'), ('20000000-0000-0000-0000-000000000002', 'demo-b-stage-001'),
+  ('20000000-0000-0000-0000-000000000001', 'demo-a-stage-calificado'), ('20000000-0000-0000-0000-000000000002', 'demo-b-stage-calificado'));
 DELETE FROM pipelines WHERE (client_account_id, demo_seed_key) IN (
   ('20000000-0000-0000-0000-000000000001', 'demo-a-pipeline-001'), ('20000000-0000-0000-0000-000000000002', 'demo-b-pipeline-001'));
 DELETE FROM properties WHERE (client_account_id, demo_seed_key) IN (
