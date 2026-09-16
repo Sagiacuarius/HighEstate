@@ -18,7 +18,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from typing import Any
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from api.application.crm_commands_wu5 import (
     CrmCommandBase,
@@ -27,6 +27,10 @@ from api.application.crm_commands_wu5 import (
 )
 from api.domain.agent_draft import INTENTS
 from api.tenant_boundary import TenantContext
+
+# OD-2 attribution: deterministic sentinel actor written on policy (auto)
+# decisions; human rows keep decided_by and leave this NULL.
+AGENT_POLICY_ACTOR = str(uuid5(NAMESPACE_URL, "agent-policy"))
 
 
 def _json(value: Any) -> str:
@@ -82,21 +86,25 @@ class AnalyzeInboundMessageCommand(CrmCommandBase):
         )
         if await cur.fetchone() is None:
             raise CrmCommandDenied("contact_not_found_in_scope")
+        verdict = (plan.get("policy") or {}).get("verdict")
+        policy_decision = verdict if verdict in ("auto", "escalate") else "escalate"
         draft_id = str(uuid4())
         await cur.execute(
             """
             INSERT INTO agent_drafts
               (id, client_account_id, conversation_id, message_id, contact_id, lead_id,
                status, intent, criteria, matched_property_ids, proposed_actions,
-               reply_text, model_provider, model_name)
+               reply_text, model_provider, model_name,
+               policy_decision, execution_mode, auto_decision_actor)
             VALUES (%s, %s, %s, %s, %s, %s, 'proposed', %s, %s::jsonb, %s::jsonb,
-                    %s::jsonb, %s, %s, %s)
+                    %s::jsonb, %s, %s, %s,
+                    %s, 'human', NULL)
             """,
             (draft_id, account_id, intent["conversation_id"], intent["message_id"],
              intent["contact_id"], intent["lead_id"], plan["intent"],
              _json(plan["criteria"]), _json(plan["matched_property_ids"]),
              _json(plan["proposed_actions"]), plan["reply_text"],
-             plan["model_provider"], plan["model_name"]),
+             plan["model_provider"], plan["model_name"], policy_decision),
         )
         await cur.execute(
             "SELECT created_at FROM agent_drafts WHERE id = %s", (draft_id,))
@@ -107,6 +115,8 @@ class AnalyzeInboundMessageCommand(CrmCommandBase):
                 "proposed_actions": plan["proposed_actions"],
                 "reply_text": plan["reply_text"],
                 "model_provider": plan["model_provider"], "model_name": plan["model_name"],
+                "policy_decision": policy_decision, "execution_mode": "human",
+                "auto_decision_actor": None,
                 "conversation_id": intent["conversation_id"],
                 "contact_id": intent["contact_id"], "lead_id": intent["lead_id"],
                 "created_at": _iso(created["created_at"]),
@@ -123,7 +133,13 @@ class AnalyzeInboundMessageCommand(CrmCommandBase):
 
 
 class DecideAgentDraftCommand(CrmCommandBase):
-    """Atomic proposed -> approved|rejected decision."""
+    """Atomic proposed -> approved|auto|rejected decision.
+
+    "approve"/"reject" is the human override (decided_by = user,
+    execution_mode stays 'human'). "auto" is the policy decision (status
+    'auto', decided_by NULL, execution_mode 'agent_policy', sentinel actor).
+    Any non-proposed source status fails closed.
+    """
 
     operation = "agent.decide"
     audit_resource_type = "agent_draft"
@@ -131,8 +147,8 @@ class DecideAgentDraftCommand(CrmCommandBase):
 
     async def execute_decision(self, context: TenantContext | None, *, draft_id: str,
                                decision: str, idempotency_key: str):
-        if decision not in ("approve", "reject"):
-            raise CrmCommandValidationError("decision must be approve or reject")
+        if decision not in ("approve", "reject", "auto"):
+            raise CrmCommandValidationError("decision must be approve, reject or auto")
         return await self.execute(
             context, idempotency_key=idempotency_key,
             canonical_input={"draft_id": draft_id, "decision": decision},
@@ -151,11 +167,18 @@ class DecideAgentDraftCommand(CrmCommandBase):
             raise CrmCommandDenied("draft_not_found_in_scope")
         if row["status"] != "proposed":
             raise CrmCommandDenied("draft_not_proposed", {"status": row["status"]})
-        new_status = "approved" if intent["decision"] == "approve" else "rejected"
+        is_auto = intent["decision"] == "auto"
+        new_status = ("auto" if is_auto
+                      else "approved" if intent["decision"] == "approve" else "rejected")
         await cur.execute(
-            "UPDATE agent_drafts SET status = %s, decided_at = now(), decided_by = %s "
+            "UPDATE agent_drafts SET status = %s, decided_at = now(), decided_by = %s, "
+            "execution_mode = %s, auto_decision_actor = %s "
             "WHERE id = %s AND client_account_id = %s",
-            (new_status, context.user.id, intent["draft_id"], account_id),
+            (new_status,
+             None if is_auto else context.user.id,
+             "agent_policy" if is_auto else "human",
+             AGENT_POLICY_ACTOR if is_auto else None,
+             intent["draft_id"], account_id),
         )
         if cur.rowcount != 1:
             raise CrmCommandDenied("draft_decision_failed")
@@ -165,6 +188,8 @@ class DecideAgentDraftCommand(CrmCommandBase):
         return {"resource_id": intent["draft_id"], "status": new_status,
                 "decision": intent["decision"], "intent": row["intent"],
                 "proposed_actions": list(actions or []),
+                "execution_mode": "agent_policy" if is_auto else "human",
+                "auto_decision_actor": AGENT_POLICY_ACTOR if is_auto else None,
                 "conversation_id": str(row["conversation_id"]),
                 "contact_id": str(row["contact_id"]),
                 "correlation_id": context.correlation_id}
@@ -178,7 +203,7 @@ class DecideAgentDraftCommand(CrmCommandBase):
 
 
 class FinalizeAgentDraftCommand(CrmCommandBase):
-    """Record the saga's aggregate outcome and move approved -> executed."""
+    """Record the saga's aggregate outcome and move approved|auto -> executed."""
 
     operation = "agent.execute"
     audit_resource_type = "agent_draft"
@@ -202,7 +227,7 @@ class FinalizeAgentDraftCommand(CrmCommandBase):
         row = await cur.fetchone()
         if row is None:
             raise CrmCommandDenied("draft_not_found_in_scope")
-        if row["status"] != "approved":
+        if row["status"] not in ("approved", "auto"):
             raise CrmCommandDenied("draft_not_approved", {"status": row["status"]})
         await cur.execute(
             "UPDATE agent_drafts SET status = 'executed', execution_result = %s::jsonb "

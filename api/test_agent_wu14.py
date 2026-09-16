@@ -1,7 +1,12 @@
 """Conversational agent (change: llm-conversational-agent, WU14) real-PostgreSQL harness.
 
-Runs against production_runtime_mvp_wu14 (disposable: runner 001-007 +
-mvp_seed.sql + mvp_seed_005.sql). Never touches earlier accepted bases.
+Runs against production_runtime_mvp_wu15 (disposable: runner 001-008 +
+mvp_seed.sql + mvp_seed_005.sql + mvp_seed_008.sql) — the documented
+supersession from change agent-autonomy Phase 11, executed early. The 008
+seed flips the two demo conversations to `auto`; setup pins `manual` via the
+dev-only agent state endpoint so every legacy approve/reject assertion keeps
+its WU14 meaning, and draft assertions cover the new default-valued columns
+(policy_decision, execution_mode). Never touches earlier accepted bases.
 
 Drafts/events/decisions are created EXCLUSIVELY by RUNNING the accepted command
 surfaces (analyze/approve/reject on the WU8 app; WU13 calendar posts for the
@@ -46,7 +51,8 @@ from api.routes.simulator_wu9 import SIMULATE_PATH
 
 ROOT = Path(__file__).resolve().parent.parent
 SEED_FILES = [ROOT / "infra" / "migrations" / "validation" / "mvp_seed.sql",
-              ROOT / "infra" / "migrations" / "validation" / "mvp_seed_005.sql"]
+              ROOT / "infra" / "migrations" / "validation" / "mvp_seed_005.sql",
+              ROOT / "infra" / "migrations" / "validation" / "mvp_seed_008.sql"]
 
 ACCOUNT_A = "20000000-0000-0000-0000-000000000001"
 ACCOUNT_B = "20000000-0000-0000-0000-000000000002"
@@ -57,6 +63,7 @@ GHOST = "0000dead-0000-4000-8000-000000000000"
 
 AGENT_ANALYZE = "/v1/demo/agent/analyze"
 AGENT_DRAFTS = "/v1/demo/agent/drafts"
+AGENT_STATE = "/v1/demo/agent/state"
 CAL_EVENTS = "/v1/demo/calendar/events"
 
 # Robot-fixed days (UTC): 2026-09-21 is a Monday, 2026-09-22 a Tuesday; both
@@ -135,6 +142,13 @@ async def preclean(db: Sql) -> None:
         "WHERE id = '66000000-0000-0000-0000-000000000001'",
         "UPDATE conversations SET unread_count = 0, updated_at = created_at "
         "WHERE id = '66000000-0000-0000-0000-000000000002'",
+        # WU15 re-point: drop the 008-owned rows first (after the lead
+        # resets above, so no FK points at them) — otherwise mvp_seed.sql's
+        # pipeline rewrite hits the Calificado stages' RESTRICT edge and the
+        # ordered re-seed (mvp_seed + 005 + 008) cannot converge.
+        "DELETE FROM pipeline_stages WHERE demo_seed_key IN "
+        "('demo-a-stage-calificado', 'demo-b-stage-calificado')",
+        "DELETE FROM knowledge_base_articles",
         "DELETE FROM command_idempotency",
         "DELETE FROM audit_records",
         "DELETE FROM outbox_events",
@@ -232,6 +246,14 @@ def http_scenarios() -> list[tuple[str, bool, str]]:
         wu8_b = TestClient(build_mvp_wu8_application(cfg, ACCOUNT_B, DemoIdentityAdapter()))
 
         with wu8_a as a, wu8_b as b:
+            # WU15 re-point: the 008 seed flips both demo conversations to
+            # `auto`; pin `manual` via the dev state endpoint so every legacy
+            # scenario below keeps its one-click WU14 meaning.
+            for _client, _corr in ((a, "wu14-pin-a"), (b, "wu14-pin-b")):
+                _pin = _post(_client, AGENT_STATE, {"mode": "manual"}, _corr)
+                assert _pin.status_code == 200, (
+                    f"manual pin failed: {_pin.status_code} {_pin.text[:200]}")
+                assert _pin.json().get("agent_mode") == "manual"
             # A1. Tenant-scoped analyze persists one schema-validated draft.
             a1 = _analyze(a, "busco un depto en venta hasta 200000", "wu14-a1")
             a1j = a1.json() if a1.status_code == 200 else {}
@@ -239,9 +261,12 @@ def http_scenarios() -> list[tuple[str, bool, str]]:
             ok = (a1.status_code == 200 and a1j.get("accepted") is True
                   and a1j.get("replayed") is False
                   and a1j.get("environment") == "dev-only-agent"
+                  and a1j.get("auto_executed") is False
                   and d1.get("status") == "proposed"
                   and d1.get("intent") == "search_properties"
                   and d1.get("model_name") == "stub-keyword-v1"
+                  and d1.get("policy_decision") in ("auto", "escalate")
+                  and d1.get("execution_mode") == "human"
                   and d1.get("conversation_id") == "66000000-0000-0000-0000-000000000001"
                   and d1.get("contact_id") == A_CONTACT
                   and bool(d1.get("draft_id")))

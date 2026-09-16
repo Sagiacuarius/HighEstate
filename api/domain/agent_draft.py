@@ -13,13 +13,16 @@ from datetime import datetime
 from typing import Any
 
 INTENTS = ("search_properties", "schedule_visit", "reschedule",
-           "ask_question", "update_preferences", "general")
+           "ask_question", "update_preferences", "general", "handoff")
 
-DRAFT_STATUSES = ("proposed", "approved", "rejected", "executed")
+DRAFT_STATUSES = ("proposed", "approved", "rejected", "executed", "auto")
 
 # Approval dispatch maps these to the accepted WU5/WU11/WU13 commands.
+# WU15 additions: send_reply (KB/catalog-grounded outbound text only) and
+# handoff_to_human (pause + flag + follow-up mechanics, never a reply).
 PROPOSED_ACTION_TYPES = ("create_follow_up", "register_interest",
-                         "create_event", "reschedule_event", "transition_lead")
+                         "create_event", "reschedule_event", "transition_lead",
+                         "send_reply", "handoff_to_human")
 
 CRITERIA_KEYS = ("operation_type", "property_type", "city", "budget_max",
                  "rooms_min", "bathrooms_min", "parking", "preferred_date",
@@ -55,3 +58,9 @@ class AgentDraft:
     decided_at: datetime | None = None
     decided_by: str | None = None
     execution_result: tuple[dict[str, Any], ...] | None = None
+    # WU15 (agent-autonomy, migration 008): persisted policy verdict
+    # (independent of who executed), who ran the decision, and the
+    # deterministic sentinel actor on policy rows (NULL on human rows).
+    policy_decision: str = "escalate"
+    execution_mode: str = "human"
+    auto_decision_actor: str | None = None
