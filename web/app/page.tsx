@@ -29,16 +29,27 @@ import {
   type DemoApi,
 } from "./demo-api";
 import { RuntimeHttpError } from "../runtime-client";
+import {
+  AGENT_CONSOLE_ACTION_TYPES,
+  KB_ARTICLE_CATEGORIES,
+  LEAD_FIELD_COLUMNS,
+} from "../../contracts/runtime-v1";
 import type {
+  AgentCalendarConfig,
   AgentDraft,
+  AgentKbArticle,
+  AgentPromptPreview,
+  AgentPromptVersion,
+  AgentSettings,
   AgentStateResponse,
   CrmInboxItem,
   DemoContextResponse,
+  KbSelfTestProbe,
 } from "../../contracts/runtime-v1";
 
 export const dynamic = "force-dynamic";
 
-type ViewKey = "resumen" | "inbox" | "leads" | "properties" | "pipeline" | "agenda" | "activity" | "auditoria" | "calendario";
+type ViewKey = "resumen" | "inbox" | "leads" | "properties" | "pipeline" | "agenda" | "activity" | "auditoria" | "calendario" | "agente";
 
 type ViewData = {
   dashboard?: import("../../contracts/runtime-v1").CrmDashboardResponse;
@@ -136,6 +147,28 @@ const VIEW_LABELS: Record<ViewKey, string> = {
   activity: "Actividad",
   auditoria: "Auditoría",
   calendario: "Calendario",
+  agente: "Agente",
+};
+
+function consoleFailure(error: unknown): string {
+  const correlation = error instanceof RuntimeHttpError
+    ? ` · ${error.envelope.error.correlation_id}` : "";
+  return `${errorText(error)}${correlation}`;
+}
+
+// WU16: etiquetas en español neutro para la consola del agente (el servidor
+// sigue siendo neutral al idioma). Días = Python weekday(): lunes=0.
+const WEEKDAY_LABELS = ["lun", "mar", "mié", "jue", "vie", "sáb", "dom"] as const;
+
+const LEAD_FIELD_LABELS: Record<string, string> = {
+  stage_id: "Etapa",
+  status: "Estado",
+  selected_property_id: "Propiedad elegida",
+};
+
+const CONSOLE_ACTION_LABELS: Record<string, string> = {
+  ...ACTION_LABELS,
+  handoff_to_human: "Derivar a un humano",
 };
 
 function errorText(error: unknown): string {
@@ -183,6 +216,251 @@ export default function DashboardPage(): React.ReactElement {
   // + handoff resume); null while unloaded or when the read fails closed.
   const [agentState, setAgentState] = React.useState<AgentStateResponse | null>(null);
   const [modeBusy, setModeBusy] = React.useState(false);
+  // WU16 Agent Console: cinco secciones sobre /v1/demo/agent/* (alcance
+  // derivado por el servidor; ningún payload lleva ids de cuenta). Cada
+  // mutación refresca su lectura; los fallos muestran el envelope + correlación.
+  const [consoleSettings, setConsoleSettings] = React.useState<AgentSettings | null>(null);
+  const [consoleError, setConsoleError] = React.useState<string | null>(null);
+  const [consoleLoading, setConsoleLoading] = React.useState(false);
+  const [consoleNote, setConsoleNote] = React.useState<string | null>(null);
+  const [consoleBusy, setConsoleBusy] = React.useState(false);
+  const [promptList, setPromptList] = React.useState<AgentPromptVersion[]>([]);
+  const [promptPreview, setPromptPreview] = React.useState<AgentPromptPreview | null>(null);
+  const [kbArticles, setKbArticles] = React.useState<AgentKbArticle[]>([]);
+  const [kbProbe, setKbProbe] = React.useState<KbSelfTestProbe | null>(null);
+  const [editingKbId, setEditingKbId] = React.useState<string | null>(null);
+  const [calendarConfig, setCalendarConfig] = React.useState<AgentCalendarConfig | null>(null);
+  const [leadFields, setLeadFields] = React.useState<string[]>([]);
+
+  const loadConsole = React.useCallback(async (client: DemoApi): Promise<void> => {
+    setConsoleLoading(true);
+    setConsoleError(null);
+    try {
+      const [settings, prompts, preview, articles, calCfg, fields] = await Promise.all([
+        client.getConsoleSettings(),
+        client.listPrompts(),
+        client.previewPrompt(),
+        client.listKbArticles(),
+        client.getCalendarConfig(),
+        client.getLeadFields(),
+      ]);
+      setConsoleSettings(settings.settings);
+      setPromptList(prompts.prompts.items);
+      setPromptPreview(preview.preview);
+      setKbArticles(articles.articles.items);
+      setCalendarConfig(calCfg.calendar_config);
+      setLeadFields(fields.allowlist.allowed);
+    } catch (error) {
+      setConsoleError(consoleFailure(error));
+    } finally {
+      setConsoleLoading(false);
+    }
+  }, []);
+
+  React.useEffect(() => {
+    if (!api || view !== "agente") return;
+    void loadConsole(api);
+  }, [api, view, account?.client_account_id, loadConsole]);
+
+  const submitConsoleSettings = async (event: React.FormEvent<HTMLFormElement>): Promise<void> => {
+    event.preventDefault();
+    if (!api || consoleBusy) return;
+    const form = new FormData(event.currentTarget);
+    const matrix = AGENT_CONSOLE_ACTION_TYPES.map((action) => ({
+      action_type: action,
+      verdict: (String(form.get(`verdict-${action}`) ?? "escalate") === "auto" ? "auto" : "escalate") as "auto" | "escalate",
+    }));
+    setConsoleBusy(true);
+    setConsoleNote(null);
+    try {
+      await api.updateConsoleSettings({
+        global_auto: form.get("global_auto") === "on",
+        calendar_auto_enabled: form.get("calendar_auto_enabled") === "on",
+        matrix,
+      });
+      const fresh = await api.getConsoleSettings();
+      setConsoleSettings(fresh.settings);
+      setConsoleNote("Ajustes guardados");
+    } catch (error) {
+      setConsoleNote(`Guardar ajustes falló: ${consoleFailure(error)}`);
+    } finally {
+      setConsoleBusy(false);
+    }
+  };
+
+  const submitCreatePrompt = async (event: React.FormEvent<HTMLFormElement>): Promise<void> => {
+    event.preventDefault();
+    if (!api || consoleBusy) return;
+    const form = new FormData(event.currentTarget);
+    setConsoleBusy(true);
+    setConsoleNote(null);
+    try {
+      await api.createPrompt({
+        tone: String(form.get("tone") ?? ""),
+        instructions: String(form.get("instructions") ?? ""),
+      });
+      event.currentTarget.reset();
+      const [prompts, preview] = await Promise.all([api.listPrompts(), api.previewPrompt()]);
+      setPromptList(prompts.prompts.items);
+      setPromptPreview(preview.preview);
+      setConsoleNote("Versión del prompt creada");
+    } catch (error) {
+      setConsoleNote(`Crear versión falló: ${consoleFailure(error)}`);
+    } finally {
+      setConsoleBusy(false);
+    }
+  };
+
+  const runRevertPrompt = async (version: number): Promise<void> => {
+    if (!api || consoleBusy) return;
+    setConsoleBusy(true);
+    setConsoleNote(null);
+    try {
+      await api.revertPrompt(version);
+      const [prompts, preview] = await Promise.all([api.listPrompts(), api.previewPrompt()]);
+      setPromptList(prompts.prompts.items);
+      setPromptPreview(preview.preview);
+      setConsoleNote(`Reversión a la versión ${version} creada como versión nueva`);
+    } catch (error) {
+      setConsoleNote(`Revertir falló: ${consoleFailure(error)}`);
+    } finally {
+      setConsoleBusy(false);
+    }
+  };
+
+  const submitCreateKb = async (event: React.FormEvent<HTMLFormElement>): Promise<void> => {
+    event.preventDefault();
+    if (!api || consoleBusy) return;
+    const form = new FormData(event.currentTarget);
+    const keywords = String(form.get("keywords") ?? "")
+      .split(",").map((k) => k.trim()).filter(Boolean);
+    setConsoleBusy(true);
+    setConsoleNote(null);
+    try {
+      await api.createKbArticle({
+        category: String(form.get("category") ?? ""),
+        question: String(form.get("question") ?? ""),
+        keywords,
+        answer: String(form.get("answer") ?? ""),
+      });
+      event.currentTarget.reset();
+      const articles = await api.listKbArticles();
+      setKbArticles(articles.articles.items);
+      setConsoleNote("Artículo creado");
+    } catch (error) {
+      setConsoleNote(`Crear artículo falló: ${consoleFailure(error)}`);
+    } finally {
+      setConsoleBusy(false);
+    }
+  };
+
+  const submitEditKb = async (event: React.FormEvent<HTMLFormElement>, articleId: string): Promise<void> => {
+    event.preventDefault();
+    if (!api || consoleBusy) return;
+    const form = new FormData(event.currentTarget);
+    const keywordsRaw = String(form.get("keywords") ?? "").trim();
+    setConsoleBusy(true);
+    setConsoleNote(null);
+    try {
+      await api.updateKbArticle(articleId, {
+        question: String(form.get("question") ?? ""),
+        keywords: keywordsRaw ? keywordsRaw.split(",").map((k) => k.trim()).filter(Boolean) : undefined,
+        answer: String(form.get("answer") ?? ""),
+      });
+      setEditingKbId(null);
+      const articles = await api.listKbArticles();
+      setKbArticles(articles.articles.items);
+      setConsoleNote("Artículo actualizado");
+    } catch (error) {
+      setConsoleNote(`Actualizar artículo falló: ${consoleFailure(error)}`);
+    } finally {
+      setConsoleBusy(false);
+    }
+  };
+
+  const runDeactivateKb = async (articleId: string): Promise<void> => {
+    if (!api || consoleBusy) return;
+    setConsoleBusy(true);
+    setConsoleNote(null);
+    try {
+      await api.deleteKbArticle(articleId);
+      const articles = await api.listKbArticles();
+      setKbArticles(articles.articles.items);
+      setConsoleNote("Artículo desactivado");
+    } catch (error) {
+      setConsoleNote(`Desactivar falló: ${consoleFailure(error)}`);
+    } finally {
+      setConsoleBusy(false);
+    }
+  };
+
+  const runSelfTest = async (event: React.FormEvent<HTMLFormElement>): Promise<void> => {
+    event.preventDefault();
+    if (!api || consoleBusy) return;
+    const form = new FormData(event.currentTarget);
+    const question = String(form.get("probe") ?? "").trim();
+    if (!question) {
+      setKbProbe(null);
+      setConsoleNote("Escribí una pregunta antes de probar.");
+      return;
+    }
+    setConsoleBusy(true);
+    setConsoleNote(null);
+    try {
+      const result = await api.kbSelfTest(question);
+      setKbProbe(result.probe);
+    } catch (error) {
+      setKbProbe(null);
+      setConsoleNote(`Probar falló: ${consoleFailure(error)}`);
+    } finally {
+      setConsoleBusy(false);
+    }
+  };
+
+  const submitCalendarConfig = async (event: React.FormEvent<HTMLFormElement>): Promise<void> => {
+    event.preventDefault();
+    if (!api || consoleBusy) return;
+    const form = new FormData(event.currentTarget);
+    const workingDays = [0, 1, 2, 3, 4, 5, 6].filter((day) => form.get(`day-${day}`) === "on");
+    const labelRaw = String(form.get("destination_label") ?? "").trim();
+    setConsoleBusy(true);
+    setConsoleNote(null);
+    try {
+      await api.updateCalendarConfig({
+        window_start: String(form.get("window_start") ?? ""),
+        window_end: String(form.get("window_end") ?? ""),
+        slot_minutes: Number(String(form.get("slot_minutes") ?? "")),
+        working_days: workingDays,
+        destination_label: labelRaw ? labelRaw : null,
+      });
+      const fresh = await api.getCalendarConfig();
+      setCalendarConfig(fresh.calendar_config);
+      setConsoleNote("Calendario guardado");
+    } catch (error) {
+      setConsoleNote(`Guardar calendario falló: ${consoleFailure(error)}`);
+    } finally {
+      setConsoleBusy(false);
+    }
+  };
+
+  const submitLeadFields = async (event: React.FormEvent<HTMLFormElement>): Promise<void> => {
+    event.preventDefault();
+    if (!api || consoleBusy) return;
+    const form = new FormData(event.currentTarget);
+    const allowed = LEAD_FIELD_COLUMNS.filter((column) => form.get(`field-${column}`) === "on");
+    setConsoleBusy(true);
+    setConsoleNote(null);
+    try {
+      await api.updateLeadFields({ allowed: [...allowed] });
+      const fresh = await api.getLeadFields();
+      setLeadFields(fresh.allowlist.allowed);
+      setConsoleNote("Campos guardados");
+    } catch (error) {
+      setConsoleNote(`Guardar campos falló: ${consoleFailure(error)}`);
+    } finally {
+      setConsoleBusy(false);
+    }
+  };
 
   const reload = React.useCallback(
     async (client: DemoApi) => {
@@ -699,6 +977,7 @@ export default function DashboardPage(): React.ReactElement {
           {navItem("activity", "↗", "Actividad")}
           {navItem("auditoria", "⌕", "Auditoría")}
           {navItem("calendario", "▦", "Calendario")}
+          {navItem("agente", "◍", "Agente")}
         </nav>
         <div className="sidebar-bottom">
           <div className="profile">
@@ -1157,6 +1436,160 @@ export default function DashboardPage(): React.ReactElement {
                   <p className="empty-note">Editando <code>{editingEventId.slice(0, 8)}…</code> — para mover de fecha usá Inicio/Fin; los vacíos no cambian.</p>
                 </>
               ) : null}
+            </section>
+          </section>
+          <section className={`view-section${view === "agente" ? " is-visible" : ""}`}>
+            <section className="panel">
+              <div className="panel-heading">
+                <div><p className="eyebrow">Consola · solo demo</p><h2>Agente · consola de autonomía</h2></div>
+                <button className="ghost-btn" disabled={consoleLoading} onClick={() => api && void loadConsole(api)}>Recargar</button>
+              </div>
+              <p className="empty-note">Rutas <code>GET/PUT /v1/demo/agent/settings</code>, <code>/prompts</code>, <code>/kb/articles</code>, <code>/calendar-config</code> y <code>/lead-fields</code>; el alcance lo deriva el servidor.</p>
+              {consoleError ? <p className="empty-note"><code>{consoleError}</code></p> : null}
+              {consoleNote ? <p className="empty-note">{consoleNote}</p> : null}
+              {consoleLoading ? <p className="empty-note">Cargando consola…</p> : null}
+              <h3>Ajustes</h3>
+              {consoleSettings ? (
+                <form className="audit-filters" onSubmit={(e) => void submitConsoleSettings(e)} aria-label="Ajustes del agente">
+                  <label>Automatización global<input type="checkbox" name="global_auto" defaultChecked={consoleSettings.global_auto} aria-label="Automatización global" /></label>
+                  <label>Creación automática de eventos<input type="checkbox" name="calendar_auto_enabled" defaultChecked={consoleSettings.calendar_auto_enabled} aria-label="Creación automática de eventos" /></label>
+                  <table className="data-table">
+                    <thead><tr><th>Acción</th><th>Veredicto</th></tr></thead>
+                    <tbody>
+                      {consoleSettings.matrix.map((entry) => (
+                        <tr key={entry.action_type}>
+                          <td><strong>{CONSOLE_ACTION_LABELS[entry.action_type] ?? entry.action_type}</strong><br /><span className="mono">{entry.action_type}</span></td>
+                          <td>
+                            <select name={`verdict-${entry.action_type}`} defaultValue={entry.verdict} aria-label={`Veredicto ${entry.action_type}`}>
+                              <option value="auto">Automático</option>
+                              <option value="escalate">Derivar</option>
+                            </select>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  <button className="ghost-btn" type="submit" disabled={consoleBusy}>Guardar ajustes</button>
+                </form>
+              ) : null}
+              <h3>Prompt</h3>
+              {promptPreview ? (
+                <div className="result-box" aria-label="Vista previa compuesta">
+                  <p><b>Vista previa compuesta · v{promptPreview.version}</b></p>
+                  <p>{promptPreview.composed_text}</p>
+                </div>
+              ) : null}
+              <form className="audit-filters" onSubmit={(e) => void submitCreatePrompt(e)} aria-label="Crear versión del prompt">
+                <label>Tono<input name="tone" aria-label="Tono" placeholder="cercano y directo" /></label>
+                <label>Instrucciones<input name="instructions" aria-label="Instrucciones" placeholder="Priorizar visitas los sábados" /></label>
+                <button className="ghost-btn" type="submit" disabled={consoleBusy}>Crear versión</button>
+              </form>
+              {promptList.length > 0 ? (
+                <table className="data-table">
+                  <thead><tr><th>Versión</th><th>Tono</th><th>Estado</th><th>Acción</th></tr></thead>
+                  <tbody>
+                    {promptList.map((row) => (
+                      <tr key={row.id}>
+                        <td><strong>v{row.version}</strong></td>
+                        <td>{row.tone}</td>
+                        <td>{row.is_active ? <span className="status-pill ok">Activa</span> : <span className="status-pill">Histórica</span>}</td>
+                        <td>
+                          {!row.is_active ? (
+                            <button className="ghost-btn" disabled={consoleBusy} onClick={() => void runRevertPrompt(row.version)}>
+                              Revertir a la versión {row.version}
+                            </button>
+                          ) : "—"}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              ) : null}
+              <h3>Base de conocimiento</h3>
+              <form className="audit-filters" onSubmit={(e) => void submitCreateKb(e)} aria-label="Crear artículo">
+                <label>Categoría
+                  <select name="category" aria-label="Categoría" defaultValue="visitas">
+                    {KB_ARTICLE_CATEGORIES.map((category) => <option key={category} value={category}>{category}</option>)}
+                  </select>
+                </label>
+                <label>Pregunta<input name="question" aria-label="Pregunta" placeholder="¿Puedo visitar el sábado?" /></label>
+                <label>Palabras clave<input name="keywords" aria-label="Palabras clave" placeholder="visita, sábado (separadas por coma)" /></label>
+                <label>Respuesta<input name="answer" aria-label="Respuesta" placeholder="Coordinamos la visita." /></label>
+                <button className="ghost-btn" type="submit" disabled={consoleBusy}>Crear artículo</button>
+              </form>
+              {kbArticles.length > 0 ? (
+                <table className="data-table">
+                  <thead><tr><th>Pregunta</th><th>Categoría</th><th>Estado</th><th>Acción</th></tr></thead>
+                  <tbody>
+                    {kbArticles.map((article) => (
+                      <tr key={article.id}>
+                        <td><strong>{article.question}</strong><br /><span className="mono">{article.id.slice(0, 8)}…</span></td>
+                        <td>{article.category}</td>
+                        <td>{article.deactivated_at ? <span className="status-pill bad">Desactivada</span> : <span className="status-pill ok">Activa</span>}</td>
+                        <td>
+                          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                            {!article.deactivated_at ? (
+                              <button className="ghost-btn danger" disabled={consoleBusy} onClick={() => void runDeactivateKb(article.id)}>Desactivar</button>
+                            ) : null}
+                            <button className="ghost-btn" disabled={consoleBusy} onClick={() => setEditingKbId(editingKbId === article.id ? null : article.id)}>Editar</button>
+                          </div>
+                          {editingKbId === article.id ? (
+                            <form className="audit-filters" onSubmit={(e) => void submitEditKb(e, article.id)} aria-label={`Editar artículo ${article.id.slice(0, 8)}`}>
+                              <label>Pregunta<input name="question" aria-label="Pregunta en edición" defaultValue={article.question} /></label>
+                              <label>Palabras clave<input name="keywords" aria-label="Palabras clave en edición" defaultValue={article.keywords.join(", ")} /></label>
+                              <label>Respuesta<input name="answer" aria-label="Respuesta en edición" defaultValue={article.answer} /></label>
+                              <button className="ghost-btn" type="submit" disabled={consoleBusy}>Guardar artículo</button>
+                            </form>
+                          ) : null}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              ) : null}
+              <form className="audit-filters" onSubmit={(e) => void runSelfTest(e)} aria-label="Probar base de conocimiento">
+                <label>Pregunta de prueba<input name="probe" aria-label="Pregunta de prueba" placeholder="¿Puedo visitar el sábado?" /></label>
+                <button className="ghost-btn" type="submit" disabled={consoleBusy}>Probar</button>
+              </form>
+              {kbProbe ? (
+                kbProbe.match ? (
+                  <div className="result-box" aria-label="Resultado de la prueba">
+                    <p><b>Coincidencia:</b> {kbProbe.article.question} <span className="mono">· {kbProbe.article.id.slice(0, 8)}… · {kbProbe.article.category} · {kbProbe.hits} aciertos</span></p>
+                  </div>
+                ) : (
+                  <p className="empty-note" aria-label="Resultado de la prueba">Sin coincidencia — ningún artículo responde a esa pregunta.</p>
+                )
+              ) : null}
+              <h3>Calendario</h3>
+              {calendarConfig ? (
+                <form className="audit-filters" onSubmit={(e) => void submitCalendarConfig(e)} aria-label="Configuración del calendario">
+                  <label>Inicio de la ventana<input name="window_start" aria-label="Inicio de la ventana" defaultValue={calendarConfig.window_start} placeholder="09:00" /></label>
+                  <label>Fin de la ventana<input name="window_end" aria-label="Fin de la ventana" defaultValue={calendarConfig.window_end} placeholder="18:00" /></label>
+                  <label>Duración del turno (min)<input name="slot_minutes" aria-label="Duración del turno" type="number" defaultValue={calendarConfig.slot_minutes} /></label>
+                  <label>Etiqueta de destino<input name="destination_label" aria-label="Etiqueta de destino" defaultValue={calendarConfig.destination_label ?? ""} placeholder="Oficina central" /></label>
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }} role="group" aria-label="Días hábiles">
+                    {[0, 1, 2, 3, 4, 5, 6].map((day) => (
+                      <label key={day} style={{ display: "flex", gap: 4, alignItems: "center" }}>
+                        <input type="checkbox" name={`day-${day}`} aria-label={`Día ${WEEKDAY_LABELS[day]}`} defaultChecked={calendarConfig.working_days.includes(day)} />
+                        {WEEKDAY_LABELS[day]}
+                      </label>
+                    ))}
+                  </div>
+                  <button className="ghost-btn" type="submit" disabled={consoleBusy}>Guardar calendario</button>
+                </form>
+              ) : null}
+              <h3>Campos del prospecto</h3>
+              <form className="audit-filters" onSubmit={(e) => void submitLeadFields(e)} aria-label="Campos del prospecto">
+                <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }} role="group" aria-label="Columnas permitidas">
+                  {LEAD_FIELD_COLUMNS.map((column) => (
+                    <label key={column} style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                      <input type="checkbox" name={`field-${column}`} aria-label={`Campo ${column}`} defaultChecked={leadFields.includes(column)} />
+                      {LEAD_FIELD_LABELS[column] ?? column} <span className="mono">{column}</span>
+                    </label>
+                  ))}
+                </div>
+                <button className="ghost-btn" type="submit" disabled={consoleBusy}>Guardar campos</button>
+              </form>
             </section>
           </section>
         </section>

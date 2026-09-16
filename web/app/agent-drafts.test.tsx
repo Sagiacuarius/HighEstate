@@ -109,6 +109,66 @@ let analyzeFail: { status: number; code: string; correlation: string } | null = 
 let statePage: () => unknown = () => agentState();
 let stateFail: { status: number; code: string; correlation: string } | null = null;
 
+/* --- WU16 Agent Console stubs (mirror api/routes/agent_wu14.py envelopes) --- */
+
+function consoleOk(resource: string, payload: unknown): unknown {
+  return {
+    contract_version: "v1", environment: "dev-only-agent", accepted: true,
+    replayed: false, correlation_id: "c1", [resource]: payload,
+  };
+}
+
+const CONSOLE_ACTIONS = ["send_reply", "register_interest", "create_follow_up",
+  "transition_lead", "create_event", "reschedule_event", "handoff_to_human"];
+const CONSOLE_GATED = ["create_event", "reschedule_event", "handoff_to_human"];
+
+let settingsPayload: () => unknown = () => ({
+  global_auto: true, calendar_auto_enabled: true,
+  matrix: CONSOLE_ACTIONS.map((action) => ({
+    action_type: action,
+    verdict: (CONSOLE_GATED as string[]).includes(action) ? "escalate" : "auto",
+  })),
+  account_id: "acct-1",
+});
+let promptsPayload: () => unknown = () => ({
+  count: 2,
+  items: [
+    { id: "p1", version: 1, tone: "formal", instructions: "", composed_snapshot: "Formal.", is_active: false, created_at: "2026-09-14T06:00:00.000Z" },
+    { id: "p2", version: 2, tone: "cercano", instructions: "Priorizar visitas.", composed_snapshot: "Cercano.", is_active: true, created_at: "2026-09-15T06:00:00.000Z" },
+  ],
+});
+let previewPayload: () => unknown = () => ({ version: 2, composed_text: "Cercano. Priorizar visitas." });
+let promptWritePayload: () => unknown = () => ({
+  resource_id: "p3", version: 3, tone: "cercano", instructions: "Nueva.",
+  composed_snapshot: "Cercano. Nueva.", reverted_from: 1, correlation_id: "c1",
+});
+let kbPayload: () => unknown = () => ({
+  count: 1,
+  items: [{
+    id: "k1", category: "visitas", question: "¿Puedo visitar el sábado?",
+    keywords: ["visita"], answer: "Coordinamos la visita.",
+    deactivated_at: null, created_at: "2026-09-15T06:00:00.000Z",
+  }],
+});
+let kbWritePayload: () => unknown = () => ({ resource_id: "k1", correlation_id: "c1" });
+let selfTestPayload: () => unknown = () => ({
+  match: true,
+  article: { id: "k1", category: "visitas", question: "¿Puedo visitar el sábado?" },
+  hits: 2,
+});
+let calCfgPayload: () => unknown = () => ({
+  window_start: "09:00", window_end: "18:00", slot_minutes: 60,
+  working_days: [0, 1, 2, 3, 4, 5], destination_label: null, account_id: "acct-1",
+});
+let fieldsPayload: () => unknown = () => ({ allowed: ["stage_id", "status"], account_id: "acct-1" });
+let consoleWriteFail: { status: number; code: string; correlation: string } | null = null;
+
+function errResponse(fail: { status: number; code: string; correlation: string }): Response {
+  return new Response(JSON.stringify({
+    error: { code: fail.code, message: `stub ${fail.code}`, correlation_id: fail.correlation },
+  }), { status: fail.status, headers: { "content-type": "application/json", "x-correlation-id": fail.correlation } });
+}
+
 function stubFetch(): void {
   calls = [];
   draftsPage = () => ({ ...META, count: 0, items: [] });
@@ -116,6 +176,12 @@ function stubFetch(): void {
   analyzeFail = null;
   statePage = () => agentState();
   stateFail = null;
+  consoleWriteFail = null;
+  selfTestPayload = () => ({
+    match: true,
+    article: { id: "k1", category: "visitas", question: "¿Puedo visitar el sábado?" },
+    hits: 2,
+  });
   vi.stubGlobal("fetch", vi.fn(async (input: string, init?: RequestInit) => {
     const url = String(input);
     const parsed = new URL(url);
@@ -144,6 +210,62 @@ function stubFetch(): void {
     }
     const decision = parsed.pathname.match(/^\/v1\/demo\/agent\/drafts\/([^/]+)\/(approve|reject)$/);
     if (decision) return jsonOk(nextCommand());
+    if (parsed.pathname === "/v1/demo/agent/settings") {
+      if (method === "GET") return jsonOk(consoleOk("settings", settingsPayload()));
+      if (consoleWriteFail) return errResponse(consoleWriteFail);
+      return jsonOk(consoleOk("settings", {
+        resource_id: "acct-1", global_auto: true, calendar_auto_enabled: true,
+        matrix: (settingsPayload() as { matrix: unknown }).matrix, correlation_id: "c1",
+      }));
+    }
+    if (parsed.pathname === "/v1/demo/agent/prompts" && method === "GET") {
+      return jsonOk(consoleOk("prompts", promptsPayload()));
+    }
+    if (parsed.pathname === "/v1/demo/agent/prompts" && method === "POST") {
+      if (consoleWriteFail) return errResponse(consoleWriteFail);
+      return jsonOk(consoleOk("prompt", promptWritePayload()));
+    }
+    if (parsed.pathname === "/v1/demo/agent/prompts/composed-preview") {
+      return jsonOk(consoleOk("preview", previewPayload()));
+    }
+    if (/^\/v1\/demo\/agent\/prompts\/\d+\/revert$/.test(parsed.pathname) && method === "POST") {
+      if (consoleWriteFail) return errResponse(consoleWriteFail);
+      return jsonOk(consoleOk("prompt", promptWritePayload()));
+    }
+    if (/^\/v1\/demo\/agent\/prompts\/\d+$/.test(parsed.pathname) && method === "GET") {
+      return jsonOk(consoleOk("prompt", (promptsPayload() as { items: unknown[] }).items[0]));
+    }
+    if (parsed.pathname === "/v1/demo/agent/kb/articles") {
+      if (method === "GET") return jsonOk(consoleOk("articles", kbPayload()));
+      if (consoleWriteFail) return errResponse(consoleWriteFail);
+      return jsonOk(consoleOk("article", kbWritePayload()));
+    }
+    if (/^\/v1\/demo\/agent\/kb\/articles\/.+$/.test(parsed.pathname) && (method === "PUT" || method === "DELETE")) {
+      if (consoleWriteFail) return errResponse(consoleWriteFail);
+      return jsonOk(consoleOk("article", kbWritePayload()));
+    }
+    if (parsed.pathname === "/v1/demo/agent/kb/self-test") {
+      if (consoleWriteFail) return errResponse(consoleWriteFail);
+      return jsonOk(consoleOk("probe", selfTestPayload()));
+    }
+    if (parsed.pathname === "/v1/demo/agent/calendar-config") {
+      if (method === "GET") return jsonOk(consoleOk("calendar_config", calCfgPayload()));
+      if (consoleWriteFail) return errResponse(consoleWriteFail);
+      const { account_id: _dropped, ...readCfg } = calCfgPayload() as Record<string, unknown>;
+      void _dropped;
+      return jsonOk(consoleOk("calendar_config", {
+        resource_id: "acct-1", ...readCfg, correlation_id: "c1",
+      }));
+    }
+    if (parsed.pathname === "/v1/demo/agent/lead-fields") {
+      if (method === "GET") return jsonOk(consoleOk("allowlist", fieldsPayload()));
+      if (consoleWriteFail) return errResponse(consoleWriteFail);
+      return jsonOk(consoleOk("allowlist", {
+        resource_id: "acct-1",
+        allowed: (fieldsPayload() as { allowed: unknown }).allowed,
+        correlation_id: "c1",
+      }));
+    }
     const body = READ_BODIES[parsed.pathname];
     if (body) return jsonOk(body);
     return new Response(JSON.stringify({
@@ -331,5 +453,131 @@ describe("WU15 agent autonomy: auto badge, handoff, mode switch, resume", () => 
     fireEvent.click(await screen.findByRole("button", { name: "Automático" }));
     expect(await screen.findByText(/corr-state-err/)).toBeTruthy();
     expect(screen.getByText(/409 · agent_handoff_open/)).toBeTruthy();
+  });
+});
+
+describe("WU16 agent console: Agente view with five sections", () => {
+  beforeEach(() => stubFetch());
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
+
+  async function openAgente(): Promise<void> {
+    await waitFor(() => {
+      if (!document.querySelector('.main-nav a[href="#agente"]')) throw new Error("nav not ready");
+    });
+    fireEvent.click(document.querySelector('.main-nav a[href="#agente"]') as HTMLElement);
+    await screen.findByText("Campos del prospecto", { selector: "h3" });
+  }
+
+  it("renders the five sections with Spanish labels plus live console data", async () => {
+    const { default: DashboardPage } = await import("./page");
+    render(React.createElement(DashboardPage));
+    await openAgente();
+    for (const heading of ["Ajustes", "Prompt", "Base de conocimiento", "Calendario", "Campos del prospecto"]) {
+      expect(screen.getByText(heading, { selector: "h3" })).toBeTruthy();
+    }
+    expect(await screen.findByText("Vista previa compuesta · v2")).toBeTruthy();
+    expect(screen.getByText("¿Puedo visitar el sábado?")).toBeTruthy();
+    expect(screen.getByLabelText("Automatización global")).toBeTruthy();
+    expect(screen.getByLabelText("Creación automática de eventos")).toBeTruthy();
+  });
+
+  it("matrix edit PUTs the typed settings payload, never an account id", async () => {
+    const { default: DashboardPage } = await import("./page");
+    render(React.createElement(DashboardPage));
+    await openAgente();
+    const select = await screen.findByLabelText("Veredicto create_event") as HTMLSelectElement;
+    fireEvent.change(select, { target: { value: "auto" } });
+    fireEvent.click(screen.getByRole("button", { name: "Guardar ajustes" }));
+    await waitFor(() => {
+      const puts = calls.filter((c) => c.url.endsWith("/v1/demo/agent/settings") && c.method === "PUT");
+      expect(puts.length).toBe(1);
+      const body = puts[0].body as Record<string, unknown>;
+      expect(body.global_auto).toBe(true);
+      expect(body.calendar_auto_enabled).toBe(true);
+      const matrix = body.matrix as Array<{ action_type: string; verdict: string }>;
+      expect(matrix).toHaveLength(7);
+      expect(matrix.find((e) => e.action_type === "create_event")?.verdict).toBe("auto");
+      expect(matrix.find((e) => e.action_type === "handoff_to_human")?.verdict).toBe("escalate");
+      for (const c of puts) expect(c.url).not.toMatch(/clientAccountId|account_id=/);
+      expect(JSON.stringify(body)).not.toMatch(/client_account_id/);
+    });
+    expect(await screen.findByText("Ajustes guardados")).toBeTruthy();
+  });
+
+  it("prompt revert POSTs to the version revert route and refreshes", async () => {
+    const { default: DashboardPage } = await import("./page");
+    render(React.createElement(DashboardPage));
+    await openAgente();
+    fireEvent.click(await screen.findByRole("button", { name: "Revertir a la versión 1" }));
+    await waitFor(() => {
+      const reverts = calls.filter((c) => c.url.endsWith("/v1/demo/agent/prompts/1/revert"));
+      expect(reverts.length).toBe(1);
+      expect(reverts[0].method).toBe("POST");
+      for (const c of reverts) expect(c.url).not.toMatch(/clientAccountId|account_id=/);
+    });
+    expect(await screen.findByText(/Reversión a la versión 1/)).toBeTruthy();
+  });
+
+  it("KB self-test renders a hit with article and hits", async () => {
+    const { default: DashboardPage } = await import("./page");
+    render(React.createElement(DashboardPage));
+    await openAgente();
+    fireEvent.change(await screen.findByLabelText("Pregunta de prueba"), {
+      target: { value: "¿Puedo visitar el sábado?" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Probar" }));
+    expect(await screen.findByText(/Coincidencia:/)).toBeTruthy();
+    expect(screen.getByText(/2 aciertos/)).toBeTruthy();
+    await waitFor(() => {
+      const probes = calls.filter((c) => c.url.endsWith("/v1/demo/agent/kb/self-test"));
+      expect(probes.length).toBe(1);
+      expect((probes[0].body as { question?: string }).question).toBe("¿Puedo visitar el sábado?");
+    });
+  });
+
+  it("KB self-test renders an explicit no-match", async () => {
+    selfTestPayload = () => ({ match: false });
+    const { default: DashboardPage } = await import("./page");
+    render(React.createElement(DashboardPage));
+    await openAgente();
+    fireEvent.change(await screen.findByLabelText("Pregunta de prueba"), {
+      target: { value: "¿Tienen cohetes?" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Probar" }));
+    expect(await screen.findByText(/Sin coincidencia/)).toBeTruthy();
+  });
+
+  it("calendar form PUTs the typed window payload", async () => {
+    const { default: DashboardPage } = await import("./page");
+    render(React.createElement(DashboardPage));
+    await openAgente();
+    fireEvent.change(await screen.findByLabelText("Inicio de la ventana"), { target: { value: "10:00" } });
+    fireEvent.change(screen.getByLabelText("Fin de la ventana"), { target: { value: "16:00" } });
+    fireEvent.click(screen.getByRole("button", { name: "Guardar calendario" }));
+    await waitFor(() => {
+      const puts = calls.filter((c) => c.url.endsWith("/v1/demo/agent/calendar-config") && c.method === "PUT");
+      expect(puts.length).toBe(1);
+      const body = puts[0].body as Record<string, unknown>;
+      expect(body.window_start).toBe("10:00");
+      expect(body.window_end).toBe("16:00");
+      expect(body.slot_minutes).toBe(60);
+      expect(body.working_days).toEqual([0, 1, 2, 3, 4, 5]);
+      expect(body.destination_label).toBeNull();
+      expect(JSON.stringify(body)).not.toMatch(/client_account_id/);
+    });
+    expect(await screen.findByText("Calendario guardado")).toBeTruthy();
+  });
+
+  it("failed writes surface the envelope with correlation", async () => {
+    consoleWriteFail = { status: 400, code: "invalid_command", correlation: "corr-console-err" };
+    const { default: DashboardPage } = await import("./page");
+    render(React.createElement(DashboardPage));
+    await openAgente();
+    fireEvent.click(await screen.findByRole("button", { name: "Guardar ajustes" }));
+    expect(await screen.findByText(/corr-console-err/)).toBeTruthy();
+    expect(screen.getByText(/400 · invalid_command/)).toBeTruthy();
   });
 });

@@ -1181,6 +1181,664 @@ export function parseDemoSimulateResponse(value: unknown): DemoSimulateResponse 
 }
 
 /**
+ * Agent Console WU16 — dev-only console shapes
+ * (mirror api/routes/agent_wu14.py console routes on build_agent_router:
+ * GET/PUT /agent/settings, prompts CRUD + /prompts/composed-preview +
+ * POST /prompts/:version/revert, kb/articles CRUD + POST /kb/self-test,
+ * GET/PUT /agent/calendar-config, GET/PUT /agent/lead-fields).
+ * Every success envelope is {contract_version, environment: dev-only-agent,
+ * accepted, replayed, correlation_id, <resource>: payload}. Scope is
+ * server-derived: request bodies never carry account ids. Unknown keys fail
+ * closed (400 server-side, throw client-side).
+ */
+export const AGENT_CONSOLE_ENVIRONMENT = "dev-only-agent" as const;
+
+/** The 7 CHECK-domain action names of agent_policy_matrix. */
+export const AGENT_CONSOLE_ACTION_TYPES: readonly string[] = [
+  "send_reply",
+  "register_interest",
+  "create_follow_up",
+  "transition_lead",
+  "create_event",
+  "reschedule_event",
+  "handoff_to_human",
+];
+
+export type AgentConsoleVerdict = "auto" | "escalate";
+
+/** The 8-value CHECK domain of knowledge_base_articles.category. */
+export const KB_ARTICLE_CATEGORIES: readonly string[] = [
+  "expensas",
+  "escritura",
+  "garantia",
+  "documentos",
+  "financiacion",
+  "amenities",
+  "requisitos",
+  "visitas",
+];
+
+/** The CHECK domain of agent_field_allowlist.column_name. */
+export const LEAD_FIELD_COLUMNS: readonly string[] = [
+  "stage_id",
+  "status",
+  "selected_property_id",
+];
+
+export type AgentPolicyMatrixEntry = {
+  action_type: string;
+  verdict: AgentConsoleVerdict;
+};
+
+export type AgentSettings = {
+  global_auto: boolean;
+  calendar_auto_enabled: boolean;
+  matrix: AgentPolicyMatrixEntry[];
+  account_id: string;
+};
+
+export type AgentPromptVersion = {
+  id: string;
+  version: number;
+  tone: string;
+  instructions: string;
+  composed_snapshot: string;
+  is_active: boolean;
+  created_at: string;
+};
+
+export type AgentPromptPreview = {
+  version: number;
+  composed_text: string;
+};
+
+export type AgentKbArticle = {
+  id: string;
+  category: string;
+  question: string;
+  keywords: string[];
+  answer: string;
+  deactivated_at: string | null;
+  created_at: string;
+};
+
+export type KbSelfTestProbe =
+  | { match: false }
+  | { match: true; article: { id: string; category: string; question: string }; hits: number };
+
+export type AgentCalendarConfig = {
+  window_start: string;
+  window_end: string;
+  slot_minutes: number;
+  working_days: number[];
+  destination_label: string | null;
+  account_id: string;
+};
+
+export type AgentLeadFields = {
+  allowed: string[];
+  account_id: string;
+};
+
+type AgentConsoleBase = {
+  contract_version: typeof RUNTIME_CONTRACT_VERSION;
+  environment: typeof AGENT_CONSOLE_ENVIRONMENT;
+  accepted: true;
+  replayed: boolean;
+  correlation_id: CorrelationId;
+};
+
+export type AgentSettingsResponse = AgentConsoleBase & { settings: AgentSettings };
+export type AgentPromptsResponse = AgentConsoleBase & {
+  prompts: { count: number; items: AgentPromptVersion[] };
+};
+export type AgentPromptResponse = AgentConsoleBase & { prompt: AgentPromptVersion };
+export type AgentPromptPreviewResponse = AgentConsoleBase & { preview: AgentPromptPreview };
+export type KbArticlesResponse = AgentConsoleBase & {
+  articles: { count: number; items: AgentKbArticle[] };
+};
+export type KbArticleResponse = AgentConsoleBase & { article: AgentKbArticle };
+export type KbSelfTestResponse = AgentConsoleBase & { probe: KbSelfTestProbe };
+export type CalendarConfigResponse = AgentConsoleBase & { calendar_config: AgentCalendarConfig };
+export type LeadFieldsResponse = AgentConsoleBase & { allowlist: AgentLeadFields };
+
+/**
+ * Write responses mirror the command payloads (not the read projections):
+ * PUT settings returns {resource_id, global_auto, calendar_auto_enabled,
+ * matrix}; prompt create/revert returns {resource_id, version, tone,
+ * instructions, composed_snapshot, reverted_from}; KB create returns
+ * {resource_id, category, question} while update/deactivate return only
+ * {resource_id}; calendar PUT returns the window without account_id;
+ * allowlist PUT returns {resource_id, allowed}. The UI re-reads the GET
+ * projection after every mutation; these parsers only prove the write
+ * envelope round-trips with the same strictness.
+ */
+export type AgentSettingsWriteResponse = AgentConsoleBase & {
+  settings: {
+    resource_id: string;
+    global_auto: boolean;
+    calendar_auto_enabled: boolean;
+    matrix: AgentPolicyMatrixEntry[];
+  };
+};
+
+export type AgentPromptWriteResponse = AgentConsoleBase & {
+  prompt: {
+    resource_id: string;
+    version: number;
+    tone: string;
+    instructions: string;
+    composed_snapshot: string;
+    reverted_from: number | null;
+  };
+};
+
+export type KbArticleWriteResponse = AgentConsoleBase & {
+  article: { resource_id: string; category: string | null; question: string | null };
+};
+
+export type CalendarConfigWriteResponse = AgentConsoleBase & {
+  calendar_config: {
+    resource_id: string;
+    window_start: string;
+    window_end: string;
+    slot_minutes: number;
+    working_days: number[];
+    destination_label: string | null;
+  };
+};
+
+export type LeadFieldsWriteResponse = AgentConsoleBase & {
+  allowlist: { resource_id: string; allowed: string[] };
+};
+
+/** Write inputs — scope is server-derived, so no account id appears here. */
+export type ConsoleSettingsInput = {
+  global_auto?: boolean;
+  calendar_auto_enabled?: boolean;
+  matrix?: AgentPolicyMatrixEntry[];
+  idempotencyKey?: string;
+};
+
+export type CreatePromptInput = {
+  tone: string;
+  instructions: string;
+  idempotencyKey?: string;
+};
+
+export type CreateKbArticleInput = {
+  category: string;
+  question: string;
+  keywords: string[];
+  answer: string;
+  idempotencyKey?: string;
+};
+
+export type UpdateKbArticleInput = {
+  category?: string;
+  question?: string;
+  keywords?: string[];
+  answer?: string;
+  idempotencyKey?: string;
+};
+
+export type CalendarConfigInput = {
+  window_start?: string;
+  window_end?: string;
+  slot_minutes?: number;
+  working_days?: number[];
+  destination_label?: string | null;
+  idempotencyKey?: string;
+};
+
+export type LeadFieldsInput = {
+  allowed: string[];
+  idempotencyKey?: string;
+};
+
+function parseConsoleEnvelope(value: unknown, resource: string, label: string): {
+  correlation: CorrelationId;
+  replayed: boolean;
+  payload: Record<string, unknown>;
+} {
+  if (!isRecord(value)) throw new Error(`Invalid ${label} response`);
+  const allowed = new Set([
+    "contract_version",
+    "environment",
+    "accepted",
+    "replayed",
+    "correlation_id",
+    resource,
+  ]);
+  for (const key of Object.keys(value)) {
+    if (!allowed.has(key)) {
+      throw new Error(`Invalid ${label} key: unknown key "${key}"`);
+    }
+  }
+  if (value.contract_version !== RUNTIME_CONTRACT_VERSION) throw new Error("Unsupported contract version");
+  if (value.environment !== AGENT_CONSOLE_ENVIRONMENT) throw new Error(`Invalid ${label} environment`);
+  if (value.accepted !== true) throw new Error(`Invalid ${label} accepted flag`);
+  if (typeof value.replayed !== "boolean") throw new Error(`Invalid ${label} replayed flag`);
+  const correlation = reqStr(value, "correlation_id", `${label}.correlation_id`);
+  correlationId(correlation);
+  return {
+    correlation: correlation as CorrelationId,
+    replayed: value.replayed,
+    payload: reqRecord(value[resource], `${label}.${resource}`),
+  };
+}
+
+function consoleBase(correlation: CorrelationId, replayed: boolean): AgentConsoleBase {
+  return {
+    contract_version: RUNTIME_CONTRACT_VERSION,
+    environment: AGENT_CONSOLE_ENVIRONMENT,
+    accepted: true,
+    replayed,
+    correlation_id: correlation,
+  };
+}
+
+function reqVerdict(value: unknown, label: string): AgentConsoleVerdict {
+  if (value === "auto" || value === "escalate") return value;
+  throw new Error(`Invalid ${label}: must be auto|escalate`);
+}
+
+function parseMatrixEntry(value: unknown, label: string): AgentPolicyMatrixEntry {
+  const record = reqRecord(value, label);
+  for (const key of Object.keys(record)) {
+    if (key !== "action_type" && key !== "verdict") {
+      throw new Error(`Invalid ${label} key: unknown key "${key}"`);
+    }
+  }
+  const action = reqStr(record, "action_type", `${label}.action_type`);
+  if (!AGENT_CONSOLE_ACTION_TYPES.includes(action)) {
+    throw new Error(`Invalid ${label}.action_type: unknown action "${action}"`);
+  }
+  return { action_type: action, verdict: reqVerdict(record.verdict, `${label}.verdict`) };
+}
+
+export function parseAgentSettingsResponse(value: unknown): AgentSettingsResponse {
+  const { correlation, replayed, payload } = parseConsoleEnvelope(value, "settings", "agent settings");
+  for (const key of Object.keys(payload)) {
+    if (key !== "global_auto" && key !== "calendar_auto_enabled" && key !== "matrix" && key !== "account_id") {
+      throw new Error(`Invalid agent settings key: unknown key "${key}"`);
+    }
+  }
+  const matrix = reqArray(payload.matrix, "agent settings.matrix")
+    .map((entry, index) => parseMatrixEntry(entry, `agent settings.matrix[${index}]`));
+  return {
+    ...consoleBase(correlation, replayed),
+    settings: {
+      global_auto: reqBool(payload, "global_auto", "agent settings.global_auto"),
+      calendar_auto_enabled: reqBool(payload, "calendar_auto_enabled", "agent settings.calendar_auto_enabled"),
+      matrix,
+      account_id: reqStr(payload, "account_id", "agent settings.account_id"),
+    },
+  };
+}
+
+function parsePromptVersion(value: unknown, label: string): AgentPromptVersion {
+  const record = reqRecord(value, label);
+  for (const key of Object.keys(record)) {
+    if (
+      key !== "id" && key !== "version" && key !== "tone" && key !== "instructions" &&
+      key !== "composed_snapshot" && key !== "is_active" && key !== "created_at"
+    ) {
+      throw new Error(`Invalid ${label} key: unknown key "${key}"`);
+    }
+  }
+  // instructions is legitimately "" on the seeded v1 (and any reverted
+  // copy of it): empty is valid here, unlike every other required string.
+  const instructions = record.instructions;
+  if (typeof instructions !== "string") throw new Error(`Invalid ${label}.instructions`);
+  return {
+    id: reqStr(record, "id", `${label}.id`),
+    version: reqNum(record, "version", `${label}.version`),
+    tone: reqStr(record, "tone", `${label}.tone`),
+    instructions,
+    composed_snapshot: reqStr(record, "composed_snapshot", `${label}.composed_snapshot`),
+    is_active: reqBool(record, "is_active", `${label}.is_active`),
+    created_at: reqStr(record, "created_at", `${label}.created_at`),
+  };
+}
+
+export function parseAgentPromptsResponse(value: unknown): AgentPromptsResponse {
+  const { correlation, replayed, payload } = parseConsoleEnvelope(value, "prompts", "agent prompts");
+  for (const key of Object.keys(payload)) {
+    if (key !== "count" && key !== "items") {
+      throw new Error(`Invalid agent prompts key: unknown key "${key}"`);
+    }
+  }
+  const items = reqArray(payload.items, "agent prompts.items")
+    .map((entry, index) => parsePromptVersion(entry, `agent prompt[${index}]`));
+  return {
+    ...consoleBase(correlation, replayed),
+    prompts: { count: reqNum(payload, "count", "agent prompts.count"), items },
+  };
+}
+
+export function parseAgentPromptResponse(value: unknown): AgentPromptResponse {
+  const { correlation, replayed, payload } = parseConsoleEnvelope(value, "prompt", "agent prompt");
+  return { ...consoleBase(correlation, replayed), prompt: parsePromptVersion(payload, "agent.prompt") };
+}
+
+export function parseAgentPromptPreviewResponse(value: unknown): AgentPromptPreviewResponse {
+  const { correlation, replayed, payload } = parseConsoleEnvelope(value, "preview", "agent preview");
+  for (const key of Object.keys(payload)) {
+    if (key !== "version" && key !== "composed_text") {
+      throw new Error(`Invalid agent preview key: unknown key "${key}"`);
+    }
+  }
+  return {
+    ...consoleBase(correlation, replayed),
+    preview: {
+      version: reqNum(payload, "version", "agent preview.version"),
+      composed_text: reqStr(payload, "composed_text", "agent preview.composed_text"),
+    },
+  };
+}
+
+function reqStringList(value: unknown, label: string): string[] {
+  return reqArray(value, label).map((entry) => {
+    if (typeof entry !== "string") throw new Error(`Invalid ${label} entry`);
+    return entry;
+  });
+}
+
+function parseKbArticle(value: unknown, label: string): AgentKbArticle {
+  const record = reqRecord(value, label);
+  for (const key of Object.keys(record)) {
+    if (
+      key !== "id" && key !== "category" && key !== "question" && key !== "keywords" &&
+      key !== "answer" && key !== "deactivated_at" && key !== "created_at"
+    ) {
+      throw new Error(`Invalid ${label} key: unknown key "${key}"`);
+    }
+  }
+  const category = reqStr(record, "category", `${label}.category`);
+  if (!KB_ARTICLE_CATEGORIES.includes(category)) {
+    throw new Error(`Invalid ${label}.category: unknown category "${category}"`);
+  }
+  return {
+    id: reqStr(record, "id", `${label}.id`),
+    category,
+    question: reqStr(record, "question", `${label}.question`),
+    keywords: reqStringList(record.keywords, `${label}.keywords`),
+    answer: reqStr(record, "answer", `${label}.answer`),
+    deactivated_at: optStr(record, "deactivated_at", `${label}.deactivated_at`),
+    created_at: reqStr(record, "created_at", `${label}.created_at`),
+  };
+}
+
+export function parseKbArticlesResponse(value: unknown): KbArticlesResponse {
+  const { correlation, replayed, payload } = parseConsoleEnvelope(value, "articles", "kb articles");
+  for (const key of Object.keys(payload)) {
+    if (key !== "count" && key !== "items") {
+      throw new Error(`Invalid kb articles key: unknown key "${key}"`);
+    }
+  }
+  const items = reqArray(payload.items, "kb articles.items")
+    .map((entry, index) => parseKbArticle(entry, `kb article[${index}]`));
+  return {
+    ...consoleBase(correlation, replayed),
+    articles: { count: reqNum(payload, "count", "kb articles.count"), items },
+  };
+}
+
+export function parseKbArticleResponse(value: unknown): KbArticleResponse {
+  const { correlation, replayed, payload } = parseConsoleEnvelope(value, "article", "kb article");
+  return { ...consoleBase(correlation, replayed), article: parseKbArticle(payload, "kb.article") };
+}
+
+export function parseKbSelfTestResponse(value: unknown): KbSelfTestResponse {
+  const { correlation, replayed, payload } = parseConsoleEnvelope(value, "probe", "kb probe");
+  const match = payload.match;
+  if (typeof match !== "boolean") throw new Error("Invalid kb probe.match");
+  if (!match) {
+    for (const key of Object.keys(payload)) {
+      if (key !== "match") {
+        throw new Error(`Invalid kb probe key: unknown key "${key}"`);
+      }
+    }
+    return { ...consoleBase(correlation, replayed), probe: { match: false } };
+  }
+  for (const key of Object.keys(payload)) {
+    if (key !== "match" && key !== "article" && key !== "hits") {
+      throw new Error(`Invalid kb probe key: unknown key "${key}"`);
+    }
+  }
+  const article = reqRecord(payload.article, "kb probe.article");
+  for (const key of Object.keys(article)) {
+    if (key !== "id" && key !== "category" && key !== "question") {
+      throw new Error(`Invalid kb probe.article key: unknown key "${key}"`);
+    }
+  }
+  const category = reqStr(article, "category", "kb probe.article.category");
+  if (!KB_ARTICLE_CATEGORIES.includes(category)) {
+    throw new Error(`Invalid kb probe.article.category: unknown category "${category}"`);
+  }
+  return {
+    ...consoleBase(correlation, replayed),
+    probe: {
+      match: true,
+      article: {
+        id: reqStr(article, "id", "kb probe.article.id"),
+        category,
+        question: reqStr(article, "question", "kb probe.article.question"),
+      },
+      hits: reqNum(payload, "hits", "kb probe.hits"),
+    },
+  };
+}
+
+const WINDOW_PATTERN = /^\d{2}:\d{2}$/;
+
+function reqWindow(value: unknown, label: string): string {
+  if (typeof value !== "string" || !WINDOW_PATTERN.test(value)) {
+    throw new Error(`Invalid ${label}: must be HH:MM`);
+  }
+  return value;
+}
+
+export function parseCalendarConfigResponse(value: unknown): CalendarConfigResponse {
+  const { correlation, replayed, payload } = parseConsoleEnvelope(value, "calendar_config", "calendar config");
+  for (const key of Object.keys(payload)) {
+    if (
+      key !== "window_start" && key !== "window_end" && key !== "slot_minutes" &&
+      key !== "working_days" && key !== "destination_label" && key !== "account_id"
+    ) {
+      throw new Error(`Invalid calendar config key: unknown key "${key}"`);
+    }
+  }
+  const days = reqArray(payload.working_days, "calendar config.working_days").map((day) => {
+    if (typeof day !== "number" || !Number.isInteger(day) || day < 0 || day > 6) {
+      throw new Error("Invalid calendar config.working_days entry: must be 0-6");
+    }
+    return day;
+  });
+  const slot = reqNum(payload, "slot_minutes", "calendar config.slot_minutes");
+  if (!Number.isInteger(slot) || slot <= 0) {
+    throw new Error("Invalid calendar config.slot_minutes: must be a positive integer");
+  }
+  return {
+    ...consoleBase(correlation, replayed),
+    calendar_config: {
+      window_start: reqWindow(payload.window_start, "calendar config.window_start"),
+      window_end: reqWindow(payload.window_end, "calendar config.window_end"),
+      slot_minutes: slot,
+      working_days: days,
+      destination_label: optStr(payload, "destination_label", "calendar config.destination_label"),
+      account_id: reqStr(payload, "account_id", "calendar config.account_id"),
+    },
+  };
+}
+
+export function parseLeadFieldsResponse(value: unknown): LeadFieldsResponse {
+  const { correlation, replayed, payload } = parseConsoleEnvelope(value, "allowlist", "lead fields");
+  for (const key of Object.keys(payload)) {
+    if (key !== "allowed" && key !== "account_id") {
+      throw new Error(`Invalid lead fields key: unknown key "${key}"`);
+    }
+  }
+  const allowed = reqStringList(payload.allowed, "lead fields.allowed");
+  for (const column of allowed) {
+    if (!LEAD_FIELD_COLUMNS.includes(column)) {
+      throw new Error(`Invalid lead fields.allowed entry: unknown column "${column}"`);
+    }
+  }
+  return {
+    ...consoleBase(correlation, replayed),
+    allowlist: {
+      allowed,
+      account_id: reqStr(payload, "account_id", "lead fields.account_id"),
+    },
+  };
+}
+
+function optAbsentStr(record: Record<string, unknown>, field: string, label: string): string | null {
+  const value = record[field];
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "string") throw new Error(`Invalid ${label}`);
+  return value;
+}
+
+function parseWorkingDays(value: unknown, label: string): number[] {
+  return reqArray(value, label).map((day) => {
+    if (typeof day !== "number" || !Number.isInteger(day) || day < 0 || day > 6) {
+      throw new Error(`Invalid ${label} entry: must be 0-6`);
+    }
+    return day;
+  });
+}
+
+function parseSlotMinutes(value: unknown, label: string): number {
+  if (typeof value !== "number" || !Number.isInteger(value) || (value as number) <= 0) {
+    throw new Error(`Invalid ${label}: must be a positive integer`);
+  }
+  return value as number;
+}
+
+function parseAllowedColumns(value: unknown, label: string): string[] {
+  const allowed = reqStringList(value, label);
+  for (const column of allowed) {
+    if (!LEAD_FIELD_COLUMNS.includes(column)) {
+      throw new Error(`Invalid ${label} entry: unknown column "${column}"`);
+    }
+  }
+  return allowed;
+}
+
+export function parseAgentSettingsWriteResponse(value: unknown): AgentSettingsWriteResponse {
+  const { correlation, replayed, payload } = parseConsoleEnvelope(value, "settings", "agent settings write");
+  for (const key of Object.keys(payload)) {
+    if (key !== "resource_id" && key !== "global_auto" && key !== "calendar_auto_enabled" && key !== "matrix" && key !== "correlation_id") {
+      throw new Error(`Invalid agent settings write key: unknown key "${key}"`);
+    }
+  }
+  const matrix = reqArray(payload.matrix, "agent settings write.matrix")
+    .map((entry, index) => parseMatrixEntry(entry, `agent settings write.matrix[${index}]`));
+  return {
+    ...consoleBase(correlation, replayed),
+    settings: {
+      resource_id: reqStr(payload, "resource_id", "agent settings write.resource_id"),
+      global_auto: reqBool(payload, "global_auto", "agent settings write.global_auto"),
+      calendar_auto_enabled: reqBool(payload, "calendar_auto_enabled", "agent settings write.calendar_auto_enabled"),
+      matrix,
+    },
+  };
+}
+
+export function parseAgentPromptWriteResponse(value: unknown): AgentPromptWriteResponse {
+  const { correlation, replayed, payload } = parseConsoleEnvelope(value, "prompt", "agent prompt write");
+  for (const key of Object.keys(payload)) {
+    if (
+      key !== "resource_id" && key !== "version" && key !== "tone" && key !== "instructions" &&
+      key !== "composed_snapshot" && key !== "reverted_from" && key !== "correlation_id"
+    ) {
+      throw new Error(`Invalid agent prompt write key: unknown key "${key}"`);
+    }
+  }
+  const reverted = payload.reverted_from;
+  if (reverted !== null && reverted !== undefined && (typeof reverted !== "number" || !Number.isInteger(reverted))) {
+    throw new Error("Invalid agent prompt write.reverted_from");
+  }
+  // instructions may be "" (seeded v1 and its reverted copies): valid here.
+  const writeInstructions = payload.instructions;
+  if (typeof writeInstructions !== "string") throw new Error("Invalid agent prompt write.instructions");
+  return {
+    ...consoleBase(correlation, replayed),
+    prompt: {
+      resource_id: reqStr(payload, "resource_id", "agent prompt write.resource_id"),
+      version: reqNum(payload, "version", "agent prompt write.version"),
+      tone: reqStr(payload, "tone", "agent prompt write.tone"),
+      instructions: writeInstructions,
+      composed_snapshot: reqStr(payload, "composed_snapshot", "agent prompt write.composed_snapshot"),
+      reverted_from: (reverted ?? null) as number | null,
+    },
+  };
+}
+
+export function parseKbArticleWriteResponse(value: unknown): KbArticleWriteResponse {
+  const { correlation, replayed, payload } = parseConsoleEnvelope(value, "article", "kb article write");
+  for (const key of Object.keys(payload)) {
+    if (key !== "resource_id" && key !== "category" && key !== "question" && key !== "correlation_id") {
+      throw new Error(`Invalid kb article write key: unknown key "${key}"`);
+    }
+  }
+  const category = optAbsentStr(payload, "category", "kb article write.category");
+  if (category !== null && !KB_ARTICLE_CATEGORIES.includes(category)) {
+    throw new Error(`Invalid kb article write.category: unknown category "${category}"`);
+  }
+  return {
+    ...consoleBase(correlation, replayed),
+    article: {
+      resource_id: reqStr(payload, "resource_id", "kb article write.resource_id"),
+      category,
+      question: optAbsentStr(payload, "question", "kb article write.question"),
+    },
+  };
+}
+
+export function parseCalendarConfigWriteResponse(value: unknown): CalendarConfigWriteResponse {
+  const { correlation, replayed, payload } = parseConsoleEnvelope(value, "calendar_config", "calendar config write");
+  for (const key of Object.keys(payload)) {
+    if (
+      key !== "resource_id" && key !== "window_start" && key !== "window_end" &&
+      key !== "slot_minutes" && key !== "working_days" && key !== "destination_label" &&
+      key !== "correlation_id"
+    ) {
+      throw new Error(`Invalid calendar config write key: unknown key "${key}"`);
+    }
+  }
+  return {
+    ...consoleBase(correlation, replayed),
+    calendar_config: {
+      resource_id: reqStr(payload, "resource_id", "calendar config write.resource_id"),
+      window_start: reqWindow(payload.window_start, "calendar config write.window_start"),
+      window_end: reqWindow(payload.window_end, "calendar config write.window_end"),
+      slot_minutes: parseSlotMinutes(payload.slot_minutes, "calendar config write.slot_minutes"),
+      working_days: parseWorkingDays(payload.working_days, "calendar config write.working_days"),
+      destination_label: optAbsentStr(payload, "destination_label", "calendar config write.destination_label"),
+    },
+  };
+}
+
+export function parseLeadFieldsWriteResponse(value: unknown): LeadFieldsWriteResponse {
+  const { correlation, replayed, payload } = parseConsoleEnvelope(value, "allowlist", "lead fields write");
+  for (const key of Object.keys(payload)) {
+    if (key !== "resource_id" && key !== "allowed" && key !== "correlation_id") {
+      throw new Error(`Invalid lead fields write key: unknown key "${key}"`);
+    }
+  }
+  return {
+    ...consoleBase(correlation, replayed),
+    allowlist: {
+      resource_id: reqStr(payload, "resource_id", "lead fields write.resource_id"),
+      allowed: parseAllowedColumns(payload.allowed, "lead fields write.allowed"),
+    },
+  };
+}
+/**
  * Scoped query cache key shared with api/queries/demo_cache.py.
  * Format mvp-demo:v1:{agencyId}:{clientAccountId}:{surface}:{qualifier} —
  * the scope is always server-derived; a client must never splice ids from

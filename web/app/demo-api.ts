@@ -19,9 +19,17 @@ import {
   parseAgentDraftsResponse,
   parseAgentDraftResponse,
   parseAgentDraftCommandResponse,
+  parseAgentPromptPreviewResponse,
+  parseAgentPromptResponse,
+  parseAgentPromptWriteResponse,
+  parseAgentPromptsResponse,
+  parseAgentSettingsResponse,
+  parseAgentSettingsWriteResponse,
   parseAgentStateResponse,
   parseAvailabilityResponse,
   parseCalendarCommandResponse,
+  parseCalendarConfigResponse,
+  parseCalendarConfigWriteResponse,
   parseCalendarEventsResponse,
   parseCrmActivityResponse,
   parseCrmAgendaResponse,
@@ -35,13 +43,31 @@ import {
   parseDemoContextResponse,
   parseDemoControlsResponse,
   parseDemoSimulateResponse,
+  parseKbArticleResponse,
+  parseKbArticleWriteResponse,
+  parseKbArticlesResponse,
+  parseKbSelfTestResponse,
+  parseLeadFieldsResponse,
+  parseLeadFieldsWriteResponse,
   type AgentDraftsResponse,
   type AgentDraftResponse,
   type AgentDraftCommandResponse,
+  type AgentPromptPreviewResponse,
+  type AgentPromptResponse,
+  type AgentPromptWriteResponse,
+  type AgentPromptsResponse,
+  type AgentSettingsResponse,
+  type AgentSettingsWriteResponse,
   type AgentStateResponse,
   type AvailabilityResponse,
   type CalendarCommandResponse,
+  type CalendarConfigInput,
+  type CalendarConfigResponse,
+  type CalendarConfigWriteResponse,
   type CalendarEventsResponse,
+  type ConsoleSettingsInput,
+  type CreateKbArticleInput,
+  type CreatePromptInput,
   type CrmActivityResponse,
   type CrmAgendaResponse,
   type CrmAuditResponse,
@@ -54,6 +80,14 @@ import {
   type DemoContextResponse,
   type DemoControlsResponse,
   type DemoSimulateResponse,
+  type KbArticleResponse,
+  type KbArticleWriteResponse,
+  type KbArticlesResponse,
+  type KbSelfTestResponse,
+  type LeadFieldsInput,
+  type LeadFieldsResponse,
+  type LeadFieldsWriteResponse,
+  type UpdateKbArticleInput,
 } from "../../contracts/runtime-v1";
 
 export const DEMO_API_ENV_VAR = "NEXT_PUBLIC_DEMO_API_BASE_URL";
@@ -108,6 +142,23 @@ export type DemoApi = {
   getAgentState: (conversationId?: string, options?: RuntimeHttpCallOptions) => Promise<AgentStateResponse>;
   setAgentMode: (mode: AgentModeInput, options?: RuntimeHttpCallOptions) => Promise<AgentStateResponse>;
   resumeHandoff: (options?: RuntimeHttpCallOptions) => Promise<AgentStateResponse>;
+  /** WU16 dev-only agent console: scope is server-derived, never a client account id. */
+  getConsoleSettings: (options?: RuntimeHttpCallOptions) => Promise<AgentSettingsResponse>;
+  updateConsoleSettings: (body: ConsoleSettingsInput, options?: RuntimeHttpCallOptions) => Promise<AgentSettingsWriteResponse>;
+  listPrompts: (options?: RuntimeHttpCallOptions) => Promise<AgentPromptsResponse>;
+  createPrompt: (body: CreatePromptInput, options?: RuntimeHttpCallOptions) => Promise<AgentPromptWriteResponse>;
+  getPromptVersion: (version: number, options?: RuntimeHttpCallOptions) => Promise<AgentPromptResponse>;
+  revertPrompt: (version: number, options?: RuntimeHttpCallOptions) => Promise<AgentPromptWriteResponse>;
+  previewPrompt: (options?: RuntimeHttpCallOptions) => Promise<AgentPromptPreviewResponse>;
+  listKbArticles: (category?: string, options?: RuntimeHttpCallOptions) => Promise<KbArticlesResponse>;
+  createKbArticle: (body: CreateKbArticleInput, options?: RuntimeHttpCallOptions) => Promise<KbArticleWriteResponse>;
+  updateKbArticle: (articleId: string, body: UpdateKbArticleInput, options?: RuntimeHttpCallOptions) => Promise<KbArticleWriteResponse>;
+  deleteKbArticle: (articleId: string, options?: RuntimeHttpCallOptions) => Promise<KbArticleWriteResponse>;
+  kbSelfTest: (question: string, options?: RuntimeHttpCallOptions) => Promise<KbSelfTestResponse>;
+  getCalendarConfig: (options?: RuntimeHttpCallOptions) => Promise<CalendarConfigResponse>;
+  updateCalendarConfig: (body: CalendarConfigInput, options?: RuntimeHttpCallOptions) => Promise<CalendarConfigWriteResponse>;
+  getLeadFields: (options?: RuntimeHttpCallOptions) => Promise<LeadFieldsResponse>;
+  updateLeadFields: (body: LeadFieldsInput, options?: RuntimeHttpCallOptions) => Promise<LeadFieldsWriteResponse>;
 };
 
 /** WU15 dev-only mode switch input: paused is handoff-only, never settable here. */
@@ -190,6 +241,42 @@ export function createDemoApi(baseUrl: string, fetcher?: DemoApiFetcher): DemoAp
       runtime.post("/v1/demo/agent/state", { mode }, options ?? {}, parseAgentStateResponse),
     resumeHandoff: (options) =>
       runtime.post("/v1/demo/agent/handoff/resume", {}, options ?? {}, parseAgentStateResponse),
+    getConsoleSettings: (options) =>
+      runtime.get("/v1/demo/agent/settings", options ?? {}, parseAgentSettingsResponse),
+    updateConsoleSettings: (body, options) =>
+      runtime.put("/v1/demo/agent/settings", body, options ?? {}, parseAgentSettingsWriteResponse),
+    listPrompts: (options) =>
+      runtime.get("/v1/demo/agent/prompts", options ?? {}, parseAgentPromptsResponse),
+    createPrompt: (body, options) =>
+      runtime.post("/v1/demo/agent/prompts", body, options ?? {}, parseAgentPromptWriteResponse),
+    getPromptVersion: (version, options) =>
+      runtime.get(`/v1/demo/agent/prompts/${encodeURIComponent(String(version))}`, options ?? {}, parseAgentPromptResponse),
+    revertPrompt: (version, options) =>
+      runtime.post(`/v1/demo/agent/prompts/${encodeURIComponent(String(version))}/revert`, {}, options ?? {}, parseAgentPromptWriteResponse),
+    previewPrompt: (options) =>
+      runtime.get("/v1/demo/agent/prompts/composed-preview", options ?? {}, parseAgentPromptPreviewResponse),
+    listKbArticles: (category, options) => {
+      const params = new URLSearchParams();
+      if (category?.trim()) params.set("category", category.trim());
+      const query = params.toString() ? `?${params.toString()}` : "";
+      return runtime.get(`/v1/demo/agent/kb/articles${query}`, options ?? {}, parseKbArticlesResponse);
+    },
+    createKbArticle: (body, options) =>
+      runtime.post("/v1/demo/agent/kb/articles", body, options ?? {}, parseKbArticleWriteResponse),
+    updateKbArticle: (articleId, body, options) =>
+      runtime.put(`/v1/demo/agent/kb/articles/${encodeURIComponent(articleId)}`, body, options ?? {}, parseKbArticleWriteResponse),
+    deleteKbArticle: (articleId, options) =>
+      runtime.delete(`/v1/demo/agent/kb/articles/${encodeURIComponent(articleId)}`, options ?? {}, parseKbArticleWriteResponse),
+    kbSelfTest: (question, options) =>
+      runtime.post("/v1/demo/agent/kb/self-test", { question }, options ?? {}, parseKbSelfTestResponse),
+    getCalendarConfig: (options) =>
+      runtime.get("/v1/demo/agent/calendar-config", options ?? {}, parseCalendarConfigResponse),
+    updateCalendarConfig: (body, options) =>
+      runtime.put("/v1/demo/agent/calendar-config", body, options ?? {}, parseCalendarConfigWriteResponse),
+    getLeadFields: (options) =>
+      runtime.get("/v1/demo/agent/lead-fields", options ?? {}, parseLeadFieldsResponse),
+    updateLeadFields: (body, options) =>
+      runtime.put("/v1/demo/agent/lead-fields", body, options ?? {}, parseLeadFieldsWriteResponse),
   };
 }
 
