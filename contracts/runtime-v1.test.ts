@@ -6,6 +6,9 @@ import {
   idempotencyKey,
   makeCorrelationId,
   optionalIdempotencyKey,
+  parseAgentDraftCommandResponse,
+  parseAgentDraftsResponse,
+  parseAgentDraftResponse,
   parseAvailabilityResponse,
   parseCalendarCommandResponse,
   parseCalendarEventsResponse,
@@ -217,6 +220,88 @@ describe("calendar contracts (WU13)", () => {
       replayed: false,
       correlation_id: "corr-c",
       result: { resource_id: "x", status: "scheduled", correlation_id: "corr-c" },
+    })).toThrow();
+  });
+});
+
+function draftFixture(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    draft_id: "d1000000-0000-0000-0000-000000000001",
+    status: "proposed",
+    intent: "schedule_visit",
+    criteria: { preferred_date: "2026-09-22", preferred_time: "10:00" },
+    matched_property_ids: [],
+    proposed_actions: [
+      { type: "create_event", params: { title: "Visita", starts_at: "2026-09-22T13:00:00.000Z", ends_at: "2026-09-22T14:00:00.000Z", contact_id: "61000000-0000-0000-0000-000000000001" } },
+      { type: "create_follow_up", params: { title: "Preparar visita", due_at: "2026-09-16T06:00:00.000Z", contact_id: "61000000-0000-0000-0000-000000000001" } },
+    ],
+    reply_text: "Coordinamos la visita.",
+    model_provider: "stub",
+    model_name: "stub-keyword-v1",
+    conversation_id: "66000000-0000-0000-0000-000000000001",
+    contact_id: "61000000-0000-0000-0000-000000000001",
+    lead_id: null,
+    created_at: "2026-09-15T06:00:00.000Z",
+    decided_at: null,
+    execution_result: null,
+    ...overrides,
+  };
+}
+
+describe("conversational agent contracts (WU14)", () => {
+  it("parses the command envelope, list, and single-draft responses", () => {
+    const cmd = parseAgentDraftCommandResponse({
+      contract_version: "v1",
+      environment: "dev-only-agent",
+      accepted: true,
+      replayed: false,
+      correlation_id: "corr-a",
+      draft: draftFixture(),
+    });
+    expect(cmd.draft.draft_id).toBe("d1000000-0000-0000-0000-000000000001");
+    expect(cmd.draft.status).toBe("proposed");
+    expect(cmd.draft.intent).toBe("schedule_visit");
+    expect(cmd.draft.proposed_actions[0].type).toBe("create_event");
+
+    const list = parseAgentDraftsResponse({
+      account_id: "acct-1",
+      as_of: "2026-09-15T06:00:00.000000Z",
+      correlation_id: "corr-l",
+      count: 1,
+      items: [draftFixture()],
+    });
+    expect(list.count).toBe(1);
+    expect(list.items[0].draft_id).toBe("d1000000-0000-0000-0000-000000000001");
+
+    const one = parseAgentDraftResponse({
+      account_id: "acct-1",
+      as_of: "2026-09-15T06:00:00.000000Z",
+      correlation_id: "corr-s",
+      draft: draftFixture(),
+    });
+    expect(one.draft.intent).toBe("schedule_visit");
+  });
+
+  it("rejects unknown intent/action type, wrong environment, and malformed drafts", () => {
+    expect(() => parseAgentDraftCommandResponse({
+      contract_version: "v1",
+      environment: "dev-only-calendar",
+      accepted: true,
+      replayed: false,
+      correlation_id: "corr-a",
+      draft: draftFixture(),
+    })).toThrow();
+    expect(() => parseAgentDraftsResponse({
+      account_id: "a", as_of: "x", correlation_id: "c", count: 1,
+      items: [draftFixture({ intent: "hack_the_planet" })],
+    })).toThrow();
+    expect(() => parseAgentDraftsResponse({
+      account_id: "a", as_of: "x", correlation_id: "c", count: 1,
+      items: [draftFixture({ proposed_actions: [{ type: "self_destruct", params: {} }] })],
+    })).toThrow();
+    expect(() => parseAgentDraftsResponse({
+      account_id: "a", as_of: "x", correlation_id: "c", count: 1,
+      items: [draftFixture({ status: "unknown" })],
     })).toThrow();
   });
 });

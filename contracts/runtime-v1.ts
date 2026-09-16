@@ -819,6 +819,147 @@ export function parseCalendarCommandResponse(value: unknown): CalendarCommandRes
 }
 
 /**
+ * Conversational Agent WU14 — draft + command response shapes
+ * (mirror api/routes/agent_wu14.py). A draft is the bounded proposal the
+ * advisor confirms; criteria/params pass through as validated records, enums
+ * and required identifiers are strict.
+ */
+export type AgentDraftStatus = "proposed" | "approved" | "rejected" | "executed";
+export type AgentIntent =
+  | "search_properties" | "schedule_visit" | "reschedule"
+  | "ask_question" | "update_preferences" | "general";
+export type AgentActionType =
+  | "create_follow_up" | "register_interest" | "create_event"
+  | "reschedule_event" | "transition_lead";
+
+export type AgentProposedAction = {
+  type: AgentActionType;
+  params: Record<string, unknown>;
+};
+
+export type AgentDraft = {
+  draft_id: string;
+  status: AgentDraftStatus;
+  intent: AgentIntent;
+  criteria: Record<string, unknown>;
+  matched_property_ids: string[];
+  proposed_actions: AgentProposedAction[];
+  reply_text: string | null;
+  model_provider: string;
+  model_name: string;
+  conversation_id: string;
+  contact_id: string;
+  lead_id: string | null;
+  created_at: string;
+  decided_at: string | null;
+  execution_result: Array<Record<string, unknown>> | null;
+};
+
+export type AgentDraftCommandResponse = {
+  contract_version: typeof RUNTIME_CONTRACT_VERSION;
+  environment: "dev-only-agent";
+  accepted: true;
+  replayed: boolean;
+  correlation_id: CorrelationId;
+  draft: AgentDraft;
+};
+
+export type AgentDraftsResponse = CrmReadMeta & {
+  items: AgentDraft[];
+  count: number;
+};
+
+export type AgentDraftResponse = CrmReadMeta & {
+  draft: AgentDraft;
+};
+
+function reqAgentStatus(value: unknown, label: string): AgentDraftStatus {
+  if (value === "proposed" || value === "approved" || value === "rejected" || value === "executed") return value;
+  throw new Error(`Invalid ${label}: must be proposed|approved|rejected|executed`);
+}
+
+const AGENT_INTENTS: readonly AgentIntent[] = [
+  "search_properties", "schedule_visit", "reschedule", "ask_question",
+  "update_preferences", "general"];
+const AGENT_ACTION_TYPES: readonly AgentActionType[] = [
+  "create_follow_up", "register_interest", "create_event", "reschedule_event",
+  "transition_lead"];
+
+function parseAgentDraft(value: unknown, label: string): AgentDraft {
+  const record = reqRecord(value, label);
+  const intent = reqStr(record, "intent", `${label}.intent`);
+  if (!AGENT_INTENTS.includes(intent as AgentIntent)) {
+    throw new Error(`Invalid ${label}.intent: unknown intent "${intent}"`);
+  }
+  const actions = reqArray(record.proposed_actions, `${label}.proposed_actions`).map((entry) => {
+    const action = reqRecord(entry, `${label} action`);
+    const type = reqStr(action, "type", `${label} action.type`);
+    if (!AGENT_ACTION_TYPES.includes(type as AgentActionType)) {
+      throw new Error(`Invalid ${label} action.type: unknown type "${type}"`);
+    }
+    return { type: type as AgentActionType, params: reqRecord(action.params, `${label} action.params`) };
+  });
+  const matched = reqArray(record.matched_property_ids, `${label}.matched_property_ids`)
+    .map((id) => {
+      if (typeof id !== "string") throw new Error(`Invalid ${label}.matched_property_ids entry`);
+      return id;
+    });
+  const execution = record.execution_result === null || record.execution_result === undefined
+    ? null
+    : reqArray(record.execution_result, `${label}.execution_result`).map((e) => reqRecord(e, `${label} execution entry`));
+  const criteria = reqRecord(record.criteria, `${label}.criteria`);
+  return {
+    draft_id: reqStr(record, "draft_id", `${label}.draft_id`),
+    status: reqAgentStatus(record.status, `${label}.status`),
+    intent: intent as AgentIntent,
+    criteria,
+    matched_property_ids: matched,
+    proposed_actions: actions,
+    reply_text: optStr(record, "reply_text", `${label}.reply_text`),
+    model_provider: reqStr(record, "model_provider", `${label}.model_provider`),
+    model_name: reqStr(record, "model_name", `${label}.model_name`),
+    conversation_id: reqStr(record, "conversation_id", `${label}.conversation_id`),
+    contact_id: reqStr(record, "contact_id", `${label}.contact_id`),
+    lead_id: optStr(record, "lead_id", `${label}.lead_id`),
+    created_at: reqStr(record, "created_at", `${label}.created_at`),
+    decided_at: optStr(record, "decided_at", `${label}.decided_at`),
+    execution_result: execution,
+  };
+}
+
+export function parseAgentDraftCommandResponse(value: unknown): AgentDraftCommandResponse {
+  if (!isRecord(value)) throw new Error("Invalid agent command response");
+  if (value.contract_version !== RUNTIME_CONTRACT_VERSION) throw new Error("Unsupported contract version");
+  if (value.environment !== "dev-only-agent") throw new Error("Invalid agent environment");
+  if (value.accepted !== true) throw new Error("Invalid agent accepted flag");
+  if (typeof value.replayed !== "boolean") throw new Error("Invalid agent replayed flag");
+  const correlation = reqStr(value, "correlation_id", "agent.correlation_id");
+  correlationId(correlation);
+  return {
+    contract_version: RUNTIME_CONTRACT_VERSION,
+    environment: "dev-only-agent",
+    accepted: true,
+    replayed: value.replayed,
+    correlation_id: correlation as CorrelationId,
+    draft: parseAgentDraft(value.draft, "agent.draft"),
+  };
+}
+
+export function parseAgentDraftsResponse(value: unknown): AgentDraftsResponse {
+  const meta = parseCrmReadMeta(value, "agent drafts");
+  const record = value as Record<string, unknown>;
+  const items = reqArray(record.items, "agent drafts.items")
+    .map((entry, index) => parseAgentDraft(entry, `agent draft[${index}]`));
+  return { ...meta, items, count: reqNum(record, "count", "agent drafts.count") };
+}
+
+export function parseAgentDraftResponse(value: unknown): AgentDraftResponse {
+  const meta = parseCrmReadMeta(value, "agent draft");
+  const record = value as Record<string, unknown>;
+  return { ...meta, draft: parseAgentDraft(record.draft, "agent.draft") };
+}
+
+/**
  * MVP Commercial Demo WU7 — server-owned demo selector shapes
  * (mirror api/identity/demo_identity.py + api/composition_wu7_mvp.py).
  * requestedAccountId is an intent/hint only; the server resolves membership

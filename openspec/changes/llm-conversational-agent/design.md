@@ -2,7 +2,7 @@
 
 ## Technical Approach
 
-Additive intelligence layer over accepted seams, never editing them. The agent is a pure "interpret → match → propose → persist" pipeline; only the interpretation calls the LLM. Matching and action derivation are deterministic SQL/mapping so the system never trusts free text for effects. Drafts are durable, tenant-scoped, audited rows; approval is a saga that dispatches each proposed action to the accepted atomic command (each idempotent and audited), then records the aggregate result. Mounted as an `agent_wu13` APIRouter on the accepted WU8 app exactly like WU9/WU12 (shared resolver/cache/runner state, one additive `include_router`).
+Additive intelligence layer over accepted seams, never editing them. The agent is a pure "interpret → match → propose → persist" pipeline; only the interpretation calls the LLM. Matching and action derivation are deterministic SQL/mapping so the system never trusts free text for effects. Drafts are durable, tenant-scoped, audited rows; approval is a saga that dispatches each proposed action to the accepted atomic command (each idempotent and audited), then records the aggregate result. Mounted as an `agent_wu14` APIRouter on the accepted WU8 app exactly like WU9/WU12 (shared resolver/cache/runner state, one additive `include_router`).
 
 ## Architecture Decisions
 
@@ -55,8 +55,8 @@ LIMIT 10
 - `api/domain/agent_draft.py` — `AgentDraft`, `ProposedAction`, intent/criteria enums, `INTENTS`.
 - `api/application/conversation_agent.py` — `ConversationAgent` orchestration (interpret → match → schedule → propose), pure of any HTTP/DB access except the injected `ModelProvider` + a matcher callable + an availability reader callable.
 - `api/adapters/postgres_agent_drafts.py` — `AgentDraftRepository` (insert/get/decide/finalize, scope-checked) + `search_properties_for_criteria` SQL.
-- `api/application/agent_commands_wu13.py` — `AnalyzeInboundMessageCommand`, `DecideAgentDraftCommand`, `finalize_agent_execution` helper (scoped UPDATE + `agent.draft.executed` audit).
-- `api/routes/agent_wu13.py` — `build_agent_router(conn_kwargs, model_provider)` with analyze/list/get/approve/reject; wired in `composition_wu8_mvp.py` with one `include_router` (additive).
+- `api/application/agent_commands_wu14.py` — `AnalyzeInboundMessageCommand`, `DecideAgentDraftCommand`, `finalize_agent_execution` helper (scoped UPDATE + `agent.draft.executed` audit).
+- `api/routes/agent_wu14.py` — `build_agent_router(conn_kwargs, model_provider)` with analyze/list/get/approve/reject; wired in `composition_wu8_mvp.py` with one `include_router` (additive).
 - `infra/migrations/007_agent_drafts.up.sql` / `.down.sql` — table + indexes.
 - `contracts/runtime-v1.ts` — `AgentDraftResponse`/`ProposedAction` + strict parser + `contracts/runtime-v1.test.ts` fixtures.
 - `web/app/demo-api.ts` — `analyzeMessage`, `listAgentDrafts`, `approveDraft`, `rejectDraft`; `web/app/page.tsx` — inline draft cards + Aprobar/Rechazar; `demo.css` only if a class is missing.
@@ -69,4 +69,4 @@ Harness scenarios: A1 analyze persists a `proposed` draft with server-scoped acc
 
 ## Risks and Rollback
 
-Non-deterministic model output — bounded by strict schema + fail-closed validation; the model never drives effects directly. Missing API key at runtime — `StubModelProvider` fallback with `model_provider` surfaced on the draft. Saga non-atomicity — idempotent actions + truthful `execution_result`. Rollback: remove router mount + WU13 modules + UI + contract section, and run `006` down; accepted WU5/WU9/WU11 surfaces and all prior data untouched by construction.
+Non-deterministic model output — bounded by strict schema + fail-closed validation; the model never drives effects directly. Missing API key at runtime — `StubModelProvider` fallback with `model_provider` surfaced on the draft. Saga non-atomicity — idempotent actions + truthful `execution_result`. Rollback: remove router mount + WU14 modules + UI + contract section, and run `007` down; accepted WU5/WU9/WU11/WU13 surfaces and all prior data untouched by construction.

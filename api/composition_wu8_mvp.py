@@ -47,6 +47,7 @@ from api.queries.crm_reads import (
 )
 from api.queries.demo_cache import ScopedQueryCache, build_scoped_key
 from api.routes.audit_screen_wu12 import build_audit_screen_router
+from api.routes.agent_wu14 import build_agent_router
 from api.routes.calendar_wu13 import build_calendar_router
 from api.routes.simulator_wu9 import (
     build_simulator_router,
@@ -357,6 +358,12 @@ def create_mvp_dashboard_app(
     # WU13: calendar / agenda (events + availability; same mount precedent).
     app.include_router(build_calendar_router(composition.conn_kwargs),
                        prefix=DEMO_PREFIX, tags=["calendar"])
+
+    # WU14: conversational agent (analyze -> propose draft -> approve/reject).
+    # The provider is selected from the environment (key -> opencode-go, else
+    # deterministic stub); no accepted route is modified.
+    app.include_router(build_agent_router(composition.conn_kwargs),
+                       prefix=DEMO_PREFIX, tags=["conversational-agent"])
 
     @app.exception_handler(404)
     async def not_found(request: Request, exc):
