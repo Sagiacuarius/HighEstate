@@ -71,6 +71,13 @@ RESET_ROUTE = f"{DEMO_PREFIX}/reset"
 _SQL_DIR = Path(__file__).resolve().parent.parent / "infra" / "migrations" / "validation"
 SEED_FILE = _SQL_DIR / "mvp_seed.sql"
 RESET_FILE = _SQL_DIR / "mvp_reset.sql"
+SEED_008_FILE = _SQL_DIR / "mvp_seed_008.sql"
+SEED_009_FILE = _SQL_DIR / "mvp_seed_009.sql"
+# WU16 (agent-console, D3 fix): dashboard seed/reset re-seeds the managed
+# console defaults (008 KB corpus + 009 console rows) so reset no longer drops
+# them. mvp_seed_005.sql stays harness-only; harness SEED_FILES stay
+# independent of this list.
+MANAGED_SEED_FILES = [SEED_FILE, SEED_008_FILE, SEED_009_FILE]
 
 
 class DemoCompositionWU8Mvp:
@@ -338,11 +345,11 @@ def create_mvp_dashboard_app(
 
     @app.post(SEED_ROUTE)
     async def seed(request: Request):
-        return await _guarded_script(request, [SEED_FILE], "seeded")
+        return await _guarded_script(request, MANAGED_SEED_FILES, "seeded")
 
     @app.post(RESET_ROUTE)
     async def reset(request: Request):
-        return await _guarded_script(request, [RESET_FILE, SEED_FILE], "reset",
+        return await _guarded_script(request, [RESET_FILE] + MANAGED_SEED_FILES, "reset",
                                      effect_aware=True)
 
     # WU9: dev-only simulator (mounted router shares this app's session state;
