@@ -73,11 +73,12 @@ SEED_FILE = _SQL_DIR / "mvp_seed.sql"
 RESET_FILE = _SQL_DIR / "mvp_reset.sql"
 SEED_008_FILE = _SQL_DIR / "mvp_seed_008.sql"
 SEED_009_FILE = _SQL_DIR / "mvp_seed_009.sql"
-# WU16 (agent-console, D3 fix): dashboard seed/reset re-seeds the managed
-# console defaults (008 KB corpus + 009 console rows) so reset no longer drops
-# them. mvp_seed_005.sql stays harness-only; harness SEED_FILES stay
-# independent of this list.
-MANAGED_SEED_FILES = [SEED_FILE, SEED_008_FILE, SEED_009_FILE]
+SEED_010_FILE = _SQL_DIR / "mvp_seed_010.sql"
+# WU16 (agent-console, D3 fix) + WU17 (configuration): dashboard seed/reset
+# re-seeds the managed defaults (008 KB corpus + 009 console rows + 010
+# timezone) so reset no longer drops them. mvp_seed_005.sql stays harness-only;
+# harness SEED_FILES stay independent of this list.
+MANAGED_SEED_FILES = [SEED_FILE, SEED_008_FILE, SEED_009_FILE, SEED_010_FILE]
 
 
 class DemoCompositionWU8Mvp:
