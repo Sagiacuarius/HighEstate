@@ -386,6 +386,7 @@ body{
 .message{
   max-width:88%;padding:10px 12px;border-radius:10px;font-size:15px;line-height:1.55;
   background:rgba(255,255,255,.045);border:1px solid var(--glass-border);color:var(--slate-100);
+  overflow-wrap:anywhere;
 }
 .message.inbound{justify-self:start}
 .message.outbound{justify-self:end;background:linear-gradient(135deg, rgba(46,78,114,.5), rgba(10,24,38,.6))}
@@ -405,6 +406,7 @@ body{
 .error-panel code{font:10px 'IBM Plex Mono',monospace;color:var(--ember-100)}
 .empty-note{color:var(--slate-400);font-size:15px;padding:14px 4px}
 .detail-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.detail-grid>*{min-width:0}
 @media(max-width:1050px){.detail-grid{grid-template-columns:1fr}}
 
 /* --- WU9 views: labeled dev-only simulator panel, danger force-reset. --- */
@@ -446,7 +448,9 @@ body{
 .agent-analyze textarea{flex:1;background:rgba(10,24,38,.5);border:1px solid rgba(148,178,208,.25);border-radius:8px;color:var(--slate-50);font:14px Inter,system-ui,sans-serif;padding:8px 10px;resize:vertical}
 .agent-analyze button{white-space:nowrap}
 .agent-draft-card{border:1px solid var(--glass-border);border-radius:12px;padding:12px;background:rgba(22,50,77,.4);margin:10px 0}
-.agent-draft-head{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:8px}
+.agent-draft-head{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:8px;flex-wrap:wrap}
+.agent-draft-head>*{min-width:0}
+.agent-analyze textarea{min-width:0}
 .agent-chips{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0}
 .agent-chips .soft,.agent-chips .mono{font-size:12px;border-radius:5px;padding:3px 8px;background:rgba(255,255,255,.06);color:var(--slate-100)}
 .agent-chips .mono{font-family:'IBM Plex Mono',monospace;background:transparent;color:var(--navy-100)}
