@@ -155,6 +155,7 @@ body{
 .accent-card .metric-foot span{color:var(--ember-100)}
 
 .dashboard-grid{display:grid;grid-template-columns:1.1fr .9fr;gap:14px}
+.dashboard-grid>*{min-width:0}
 
 /* --- panel base: la misma tarjeta de vidrio que las métricas, reutilizada en todo el resto --- */
 .panel{
