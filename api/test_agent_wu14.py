@@ -37,6 +37,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from fastapi.testclient import TestClient
 
@@ -45,6 +46,7 @@ from psycopg.rows import dict_row
 
 from api.adapters.postgres_core import load_database_configuration
 from api.composition_wu8_mvp import build_mvp_wu8_application
+from api.domain.calendar_event import BUSINESS_TIMEZONE
 from api.identity.demo_identity import AbsentDemoIdentityAdapter, DemoIdentityAdapter
 from api.routes.audit_screen_wu12 import AUDIT_PATH
 from api.routes.simulator_wu9 import SIMULATE_PATH
@@ -65,18 +67,6 @@ AGENT_ANALYZE = "/v1/demo/agent/analyze"
 AGENT_DRAFTS = "/v1/demo/agent/drafts"
 AGENT_STATE = "/v1/demo/agent/state"
 CAL_EVENTS = "/v1/demo/calendar/events"
-
-# Robot-fixed days (UTC): 2026-09-21 is a Monday, 2026-09-22 a Tuesday; both
-# sit inside the agent's now+7d window for a server date of 2026-09-16.
-MON = "2026-09-21"
-TUE = "2026-09-22"
-TUE_1000 = f"{TUE}T13:00:00.000Z"   # BA 10:00
-TUE_1100 = f"{TUE}T14:00:00.000Z"   # BA 11:00
-MON_1300 = f"{MON}T16:00:00.000Z"   # BA 13:00 (A15 target)
-MON_1600 = f"{MON}T19:00:00.000Z"   # BA 16:00
-MON_1700 = f"{MON}T20:00:00.000Z"   # BA 17:00 (A15 proposed slot)
-MON_1000 = f"{MON}T13:00:00.000Z"   # BA 10:00 (A10 proposed slot)
-OUTSIDE = "2026-10-01"
 
 AGENT_ACTIONS = ("crm.agent.analyze", "crm.agent.decide", "crm.agent.execute")
 
@@ -236,6 +226,36 @@ def http_scenarios() -> list[tuple[str, bool, str]]:
 
     def record(name: str, ok: bool, detail: str = "") -> None:
         results.append((name, ok, str(detail)))
+
+    # Relative calendar dates (date-aging fix): the booking window is
+    # [datetime.now(timezone.utc), now + 7d], so hardcoded 2026-09-* dates fall
+    # outside it once the system clock moves past them. Compute the next Monday
+    # and the next Tuesday (strictly after Monday) inside the window, then build
+    # every slot constant and analyze body from them, preserving the exact UTC
+    # offsets (Buenos Aires is UTC-3, no DST).
+    _now = datetime.now(timezone.utc)
+    _tz = ZoneInfo(BUSINESS_TIMEZONE)
+    _today = _now.astimezone(_tz).date()
+
+    def _next_day(predicate):
+        for n in range(1, 8):
+            candidate = _today + timedelta(days=n)
+            if predicate(candidate.weekday()):
+                return candidate
+        raise AssertionError("no matching day within the 7-day window")
+
+    _mon = _next_day(lambda w: w == 0)
+    _tue = _next_day(lambda w: w == 1)
+    if _tue <= _mon:
+        _tue = _mon + timedelta(days=1)
+    MON = _mon.isoformat()
+    TUE = _tue.isoformat()
+    TUE_1000 = f"{TUE}T13:00:00.000Z"   # BA 10:00
+    TUE_1100 = f"{TUE}T14:00:00.000Z"   # BA 11:00
+    MON_1300 = f"{MON}T16:00:00.000Z"   # BA 13:00 (A15 target)
+    MON_1600 = f"{MON}T19:00:00.000Z"   # BA 16:00
+    MON_1700 = f"{MON}T20:00:00.000Z"   # BA 17:00 (A15 proposed slot)
+    MON_1000 = f"{MON}T13:00:00.000Z"   # BA 10:00 (A10 proposed slot)
 
     cfg = load_database_configuration()
     db = Sql(cfg)
@@ -419,7 +439,7 @@ def http_scenarios() -> list[tuple[str, bool, str]]:
             # A10. Denial is recorded truthfully: the agent proposes a free slot
             # (13:00Z = BA 10:00), the slot gets occupied AFTER analysis but
             # BEFORE approval -> create_event denied + follow_up success.
-            a10 = _analyze(a, "quiero coordinar una visita el 2026-09-21 a las 10:00",
+            a10 = _analyze(a, f"quiero coordinar una visita el {MON} a las 10:00",
                            "wu14-a10")
             d10j = a10.json().get("draft", {})
             act10 = [x.get("type") for x in d10j.get("proposed_actions", [])]
@@ -453,7 +473,7 @@ def http_scenarios() -> list[tuple[str, bool, str]]:
                 "idempotencyKey": "wu14-a14-create",
             }, "wu14-a14-create")
             ev14_id = ((ev14.json().get("result") or {}).get("resource_id"))
-            a14 = _analyze(a, "¿podemos reprogramar la visita para el 2026-09-21 "
+            a14 = _analyze(a, f"¿podemos reprogramar la visita para el {MON} "
                               "a las 16:00?", "wu14-a14")
             d14 = a14.json().get("draft", {})
             act14 = {x.get("type"): x.get("params", {}) for x in
@@ -513,7 +533,7 @@ def http_scenarios() -> list[tuple[str, bool, str]]:
                    f"outcomes={outcomes15}")
 
             # A13. Preferred date/time honored; agent event source='agent'.
-            a13 = _analyze(a, "visita el 2026-09-22 a las 10:00", "wu14-a13")
+            a13 = _analyze(a, f"visita el {TUE} a las 10:00", "wu14-a13")
             d13 = a13.json().get("draft", {})
             act13 = {x.get("type"): x.get("params", {}) for x in
                      d13.get("proposed_actions", [])}
@@ -529,7 +549,8 @@ def http_scenarios() -> list[tuple[str, bool, str]]:
             ev13_sql = asyncio.run(db.one(
                 "SELECT id, source FROM calendar_events WHERE starts_at = %s "
                 "AND client_account_id = %s AND status = 'scheduled'",
-                (datetime(2026, 9, 22, 13, 0, tzinfo=timezone.utc), ACCOUNT_A)))
+                (datetime(_tue.year, _tue.month, _tue.day, 13, 0, tzinfo=timezone.utc),
+                 ACCOUNT_A)))
             au13 = _audit(a, "wu14-a13-ca", action="crm.calendar.create")
             ok = (ap13.status_code == 200
                   and ev13_sql is not None and ev13_sql["source"] == "agent"
@@ -551,11 +572,11 @@ def http_scenarios() -> list[tuple[str, bool, str]]:
                 if r.status_code != 200:
                     ok = False
                     break
-            # Body MUST differ from A13's ("visita el 2026-09-22 a las 10:00"):
+            # Body MUST differ from A13's (same preferred date/time as A13):
             # the same body computes the same fallback analyze key and would
             # replay A13's stored draft (with create_event) instead of fresh
             # availability. "por favor" keeps the same criteria but a new key.
-            a17 = _analyze(a, "visita el 2026-09-22 a las 10:00 por favor", "wu14-a17")
+            a17 = _analyze(a, f"visita el {TUE} a las 10:00 por favor", "wu14-a17")
             d17 = a17.json().get("draft", {})
             act17 = [x.get("type") for x in d17.get("proposed_actions", [])]
             only_follow_up = (len(act17) == 1 and act17[0] == "create_follow_up")
@@ -564,8 +585,10 @@ def http_scenarios() -> list[tuple[str, bool, str]]:
             n_events17 = asyncio.run(db.count(
                 "SELECT count(*) AS n FROM calendar_events WHERE client_account_id = %s "
                 "AND starts_at >= %s AND ends_at >= %s",
-                (ACCOUNT_A, datetime(2026, 9, 22, 0, 0, tzinfo=timezone.utc),
-                 datetime(2026, 9, 22, 0, 0, tzinfo=timezone.utc))))
+                (ACCOUNT_A, datetime(_tue.year, _tue.month, _tue.day, 0, 0,
+                                     tzinfo=timezone.utc),
+                 datetime(_tue.year, _tue.month, _tue.day, 0, 0,
+                          tzinfo=timezone.utc))))
             record("A17 full day booked -> follow-up only (no invented slot)",
                    ok and a17.status_code == 200 and only_follow_up
                    and ap17.status_code == 200 and n_events17 == 9,

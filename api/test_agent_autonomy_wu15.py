@@ -37,9 +37,10 @@ from __future__ import annotations
 
 import asyncio
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import NAMESPACE_URL, uuid5
+from zoneinfo import ZoneInfo
 
 from fastapi.testclient import TestClient
 
@@ -49,6 +50,7 @@ from psycopg.rows import dict_row
 from api.adapters.postgres_core import load_database_configuration
 from api.application.agent_policy import PolicySignals, evaluate as evaluate_policy
 from api.composition_wu8_mvp import build_mvp_wu8_application
+from api.domain.calendar_event import BUSINESS_TIMEZONE
 from api.identity.demo_identity import AbsentDemoIdentityAdapter, DemoIdentityAdapter
 from api.routes.simulator_wu9 import SIMULATE_PATH
 
@@ -75,11 +77,6 @@ AGENT_DRAFTS = "/v1/demo/agent/drafts"
 AGENT_STATE = "/v1/demo/agent/state"
 AGENT_RESUME = "/v1/demo/agent/handoff/resume"
 INBOX_MESSAGES = f"/v1/demo/inbox/{A_CONV}/messages"
-
-MON_1000 = "2026-09-21T13:00:00.000Z"   # Monday BA 10:00
-MON_1100 = "2026-09-21T14:00:00.000Z"
-TUE_1000 = "2026-09-22T13:00:00.000Z"   # Tuesday BA 10:00
-TUE_1100 = "2026-09-22T14:00:00.000Z"
 
 
 class Sql:
@@ -238,6 +235,29 @@ def http_scenarios() -> list[tuple[str, bool, str]]:
 
     def record(name: str, ok: bool, detail: str = "") -> None:
         results.append((name, ok, str(detail)))
+
+    # Relative calendar dates (date-aging fix): the booking window is
+    # [datetime.now(timezone.utc), now + 7d], so hardcoded 2026-09-* dates fall
+    # outside it once the system clock moves past them. Compute the next Monday
+    # and the next Tuesday (strictly after Monday) inside the window, then build
+    # the analyze bodies and event lookups from them (Buenos Aires is UTC-3).
+    _now = datetime.now(timezone.utc)
+    _tz = ZoneInfo(BUSINESS_TIMEZONE)
+    _today = _now.astimezone(_tz).date()
+
+    def _next_day(predicate):
+        for n in range(1, 8):
+            candidate = _today + timedelta(days=n)
+            if predicate(candidate.weekday()):
+                return candidate
+        raise AssertionError("no matching day within the 7-day window")
+
+    _mon = _next_day(lambda w: w == 0)
+    _tue = _next_day(lambda w: w == 1)
+    if _tue <= _mon:
+        _tue = _mon + timedelta(days=1)
+    MON = _mon.isoformat()
+    TUE = _tue.isoformat()
 
     cfg = load_database_configuration()
     assert cfg.get("dbname") == "production_runtime_mvp_wu15", (
@@ -570,7 +590,7 @@ def http_scenarios() -> list[tuple[str, bool, str]]:
             corpus.append(("B4c", d4c))
 
             # B6. Auto booking zero-click, then manual behaves as WU14.
-            b6 = _analyze(a, "quiero coordinar una visita el 2026-09-21 "
+            b6 = _analyze(a, f"quiero coordinar una visita el {MON} "
                              "a las 10:00, por favor", "wu15-b6")
             b6j = b6.json() if b6.status_code == 200 else {}
             d6 = (b6j.get("draft") or {})
@@ -579,7 +599,8 @@ def http_scenarios() -> list[tuple[str, bool, str]]:
             ev6 = asyncio.run(db.one(
                 "SELECT source FROM calendar_events WHERE client_account_id = %s "
                 "AND starts_at = %s AND status = 'scheduled'",
-                (ACCOUNT_A, datetime(2026, 9, 21, 13, 0, tzinfo=timezone.utc))))
+                (ACCOUNT_A, datetime(_mon.year, _mon.month, _mon.day, 13, 0,
+                                     tzinfo=timezone.utc))))
             ok = (b6.status_code == 200 and b6j.get("auto_executed") is True
                   and d6.get("status") == "executed"
                   and d6.get("intent") == "schedule_visit"
@@ -592,8 +613,8 @@ def http_scenarios() -> list[tuple[str, bool, str]]:
             corpus.append(("B6", d6))
             pin6 = _set_mode(a, "manual", "wu15-b6-pin")
             assert pin6.status_code == 200
-            b6m = _analyze(a, "quiero coordinar una visita el 2026-09-22 "
-                              "a las 10:00, por favor", "wu15-b6m")
+            b6m = _analyze(a, f"quiero coordinar una visita el {TUE} "
+                               "a las 10:00, por favor", "wu15-b6m")
             b6mj = b6m.json() if b6m.status_code == 200 else {}
             d6m = (b6mj.get("draft") or {})
             t6m = [x.get("type") for x in d6m.get("proposed_actions", [])]
@@ -608,7 +629,8 @@ def http_scenarios() -> list[tuple[str, bool, str]]:
             ev6m = asyncio.run(db.one(
                 "SELECT source FROM calendar_events WHERE client_account_id = %s "
                 "AND starts_at = %s AND status = 'scheduled'",
-                (ACCOUNT_A, datetime(2026, 9, 22, 13, 0, tzinfo=timezone.utc))))
+                (ACCOUNT_A, datetime(_tue.year, _tue.month, _tue.day, 13, 0,
+                                     tzinfo=timezone.utc))))
             ok = (ok_manual and ap6m.status_code == 200
                   and out6m.get("create_event") == "success"
                   and ev6m is not None and ev6m["source"] == "agent")
