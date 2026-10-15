@@ -29,6 +29,12 @@ import {
   parseCalendarConfigWriteResponse,
   parseLeadFieldsResponse,
   parseLeadFieldsWriteResponse,
+  parseCustomFieldDefinitionsResponse,
+  parseCustomFieldValuesResponse,
+  parseCustomFieldValuesWriteResponse,
+  parseCustomFieldWriteResponse,
+  parseContactsByTagResponse,
+  parseContactTagsResponse,
   parseLivenessResponse,
   parseReadinessResponse,
 } from "./runtime-v1";
@@ -542,9 +548,15 @@ describe("agent console contracts (WU16)", () => {
       window_start: "18:00", window_end: "09:00", slot_minutes: 0,
       working_days: [7], destination_label: null, account_id: "a",
     }))).toThrow();
-    expect(() => parseLeadFieldsResponse(consoleEnvelope("allowlist", {
+    // WU17: custom field names are now valid allowlist entries (server is the
+    // authority); only empty strings are rejected client-side.
+    const widened = parseLeadFieldsResponse(consoleEnvelope("allowlist", {
       allowed: ["stage_id", "custom_field"], account_id: "a",
-    }))).toThrow(/unknown column/);
+    }));
+    expect(widened.allowlist.allowed).toEqual(["stage_id", "custom_field"]);
+    expect(() => parseLeadFieldsResponse(consoleEnvelope("allowlist", {
+      allowed: ["stage_id", ""], account_id: "a",
+    }))).toThrow(/non-empty/);
     expect(() => parseAgentPromptPreviewResponse(consoleEnvelope("preview",
       { version: 1, composed_text: "x", rogue: 1 }))).toThrow(/unknown key/);
   });
@@ -598,8 +610,141 @@ describe("agent console contracts (WU16)", () => {
       resource_id: "acct-1", allowed: ["status"], correlation_id: "corr-w",
     }));
     expect(fieldsWrite.allowlist.allowed).toEqual(["status"]);
+    // WU17: custom names are valid; only empty strings are rejected.
+    const customWrite = parseLeadFieldsWriteResponse(consoleEnvelope("allowlist", {
+      resource_id: "a", allowed: ["custom_field"], correlation_id: "c",
+    }));
+    expect(customWrite.allowlist.allowed).toEqual(["custom_field"]);
     expect(() => parseLeadFieldsWriteResponse(consoleEnvelope("allowlist", {
-      resource_id: "a", allowed: ["rogue"], correlation_id: "c",
-    }))).toThrow(/unknown column/);
+      resource_id: "a", allowed: [""], correlation_id: "c",
+    }))).toThrow(/non-empty/);
+  });
+});
+
+/* --- Configuration WU17: custom fields, lead values, contact tags, timezone --- */
+
+function customFieldFixture(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id: "cf000000-0000-0000-0000-000000000001",
+    name: "barrio",
+    type: "select",
+    choices: ["Palermo", "Belgrano"],
+    ...overrides,
+  };
+}
+
+describe("configuration console contracts (WU17)", () => {
+  it("parses custom-field definitions, values, and tags fixtures", () => {
+    const fields = parseCustomFieldDefinitionsResponse(consoleEnvelope("custom_fields", {
+      count: 1, items: [customFieldFixture()],
+    }));
+    expect(fields.custom_fields.count).toBe(1);
+    expect(fields.custom_fields.items[0].name).toBe("barrio");
+    expect(fields.custom_fields.items[0].choices).toEqual(["Palermo", "Belgrano"]);
+
+    const textField = parseCustomFieldDefinitionsResponse(consoleEnvelope("custom_fields", {
+      count: 1, items: [customFieldFixture({ name: "nota", type: "text", choices: [] })],
+    }));
+    expect(textField.custom_fields.items[0].type).toBe("text");
+    expect(textField.custom_fields.items[0].choices).toEqual([]);
+
+    const values = parseCustomFieldValuesResponse(consoleEnvelope("custom_values", {
+      lead_id: "lead-1",
+      values: [{ field_id: "cf000000-0000-0000-0000-000000000001", name: "barrio", type: "select", value: "Palermo" }],
+    }));
+    expect(values.custom_values.lead_id).toBe("lead-1");
+    expect(values.custom_values.values[0].value).toBe("Palermo");
+
+    const valuesWrite = parseCustomFieldValuesWriteResponse(consoleEnvelope("custom_values", {
+      lead_id: "lead-1",
+      values: [{ field_id: "cf000000-0000-0000-0000-000000000001", name: "barrio", type: "select", value: "Belgrano" }],
+    }));
+    expect(valuesWrite.custom_values.values[0].value).toBe("Belgrano");
+
+    const contacts = parseContactsByTagResponse(consoleEnvelope("contacts", {
+      count: 1, items: [{ id: "contact-1", name: "Camila Torres", tags: ["vip", "compradora"] }],
+    }));
+    expect(contacts.contacts.items[0].tags).toEqual(["vip", "compradora"]);
+
+    const tags = parseContactTagsResponse(consoleEnvelope("tags", {
+      contact_id: "contact-1", tags: ["vip", "compradora"],
+    }));
+    expect(tags.tags.contact_id).toBe("contact-1");
+    expect(tags.tags.tags).toEqual(["vip", "compradora"]);
+  });
+
+  it("parses the custom-field write envelope mirroring create/update/delete", () => {
+    const create = parseCustomFieldWriteResponse(consoleEnvelope("custom_field", {
+      resource_id: "cf000000-0000-0000-0000-000000000001",
+      name: "barrio", type: "select", choices: ["Palermo"], correlation_id: "corr-w",
+    }));
+    expect(create.custom_field.name).toBe("barrio");
+    expect(create.custom_field.type).toBe("select");
+    expect(create.custom_field.choices).toEqual(["Palermo"]);
+
+    // Non-select create/update carries choices null.
+    const textCreate = parseCustomFieldWriteResponse(consoleEnvelope("custom_field", {
+      resource_id: "cf2", name: "nota", type: "text", choices: null, correlation_id: "corr-w",
+    }));
+    expect(textCreate.custom_field.choices).toBeNull();
+
+    // Delete returns only resource_id.
+    const del = parseCustomFieldWriteResponse(consoleEnvelope("custom_field", {
+      resource_id: "cf2", correlation_id: "corr-w",
+    }));
+    expect(del.custom_field.resource_id).toBe("cf2");
+    expect(del.custom_field.name).toBeNull();
+    expect(del.custom_field.type).toBeNull();
+  });
+
+  it("rejects invalid enums and unknown nested keys", () => {
+    expect(() => parseCustomFieldDefinitionsResponse(consoleEnvelope("custom_fields", {
+      count: 1, items: [customFieldFixture({ type: "boolean" })],
+    }))).toThrow(/type/);
+    expect(() => parseCustomFieldDefinitionsResponse(consoleEnvelope("custom_fields", {
+      count: 1, items: [customFieldFixture({ rogue: 1 })],
+    }))).toThrow(/unknown key/);
+    expect(() => parseCustomFieldValuesResponse(consoleEnvelope("custom_values", {
+      lead_id: "lead-1",
+      values: [{ field_id: "f", name: "n", type: "select", value: "x", rogue: 1 }],
+    }))).toThrow(/unknown key/);
+    expect(() => parseContactsByTagResponse(consoleEnvelope("contacts", {
+      count: 1, items: [{ id: "contact-1", name: "Camila", tags: "vip" }],
+    }))).toThrow(/tags/);
+    expect(() => parseContactTagsResponse(consoleEnvelope("tags", {
+      contact_id: "contact-1", tags: ["vip"], rogue: 1,
+    }))).toThrow(/unknown key/);
+    expect(() => parseCustomFieldWriteResponse(consoleEnvelope("custom_field", {
+      resource_id: "f", name: "n", type: "boolean", choices: null, correlation_id: "c",
+    }))).toThrow(/type/);
+  });
+
+  it("parses the calendar timezone and rejects an empty value", () => {
+    const withTz = parseCalendarConfigResponse(consoleEnvelope("calendar_config", {
+      window_start: "10:00", window_end: "16:00", slot_minutes: 30,
+      working_days: [0, 1, 2, 3, 4], destination_label: null,
+      timezone: "America/Argentina/Buenos_Aires", account_id: "a",
+    }));
+    expect(withTz.calendar_config.timezone).toBe("America/Argentina/Buenos_Aires");
+
+    // Pre-010 / absent row: timezone is optional (server fallback to constant).
+    const withoutTz = parseCalendarConfigResponse(consoleEnvelope("calendar_config", {
+      window_start: "10:00", window_end: "16:00", slot_minutes: 30,
+      working_days: [0, 1, 2, 3, 4], destination_label: null, account_id: "a",
+    }));
+    expect(withoutTz.calendar_config.timezone).toBeNull();
+
+    expect(() => parseCalendarConfigResponse(consoleEnvelope("calendar_config", {
+      window_start: "10:00", window_end: "16:00", slot_minutes: 30,
+      working_days: [0, 1, 2, 3, 4], destination_label: null,
+      timezone: "", account_id: "a",
+    }))).toThrow(/timezone/);
+
+    const writeTz = parseCalendarConfigWriteResponse(consoleEnvelope("calendar_config", {
+      resource_id: "a", window_start: "10:00", window_end: "16:00", slot_minutes: 30,
+      working_days: [0, 1, 2, 3, 4], destination_label: null,
+      timezone: "America/New_York", correlation_id: "c",
+    }));
+    expect(writeTz.calendar_config.timezone).toBe("America/New_York");
   });
 });

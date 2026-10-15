@@ -49,6 +49,12 @@ import {
   parseKbSelfTestResponse,
   parseLeadFieldsResponse,
   parseLeadFieldsWriteResponse,
+  parseCustomFieldDefinitionsResponse,
+  parseCustomFieldValuesResponse,
+  parseCustomFieldValuesWriteResponse,
+  parseCustomFieldWriteResponse,
+  parseContactsByTagResponse,
+  parseContactTagsResponse,
   type AgentDraftsResponse,
   type AgentDraftResponse,
   type AgentDraftCommandResponse,
@@ -87,6 +93,16 @@ import {
   type LeadFieldsInput,
   type LeadFieldsResponse,
   type LeadFieldsWriteResponse,
+  type CreateCustomFieldInput,
+  type UpdateCustomFieldInput,
+  type SetLeadCustomValuesInput,
+  type ContactTagInput,
+  type CustomFieldDefinitionsResponse,
+  type CustomFieldValuesResponse,
+  type CustomFieldValuesWriteResponse,
+  type CustomFieldWriteResponse,
+  type ContactsByTagResponse,
+  type ContactTagsResponse,
   type UpdateKbArticleInput,
 } from "../../contracts/runtime-v1";
 
@@ -159,6 +175,16 @@ export type DemoApi = {
   updateCalendarConfig: (body: CalendarConfigInput, options?: RuntimeHttpCallOptions) => Promise<CalendarConfigWriteResponse>;
   getLeadFields: (options?: RuntimeHttpCallOptions) => Promise<LeadFieldsResponse>;
   updateLeadFields: (body: LeadFieldsInput, options?: RuntimeHttpCallOptions) => Promise<LeadFieldsWriteResponse>;
+  /** WU17 configuration console: scope is server-derived, never a client account id. */
+  listCustomFields: (options?: RuntimeHttpCallOptions) => Promise<CustomFieldDefinitionsResponse>;
+  createCustomField: (body: CreateCustomFieldInput, options?: RuntimeHttpCallOptions) => Promise<CustomFieldWriteResponse>;
+  updateCustomField: (fieldId: string, body: UpdateCustomFieldInput, options?: RuntimeHttpCallOptions) => Promise<CustomFieldWriteResponse>;
+  deleteCustomField: (fieldId: string, options?: RuntimeHttpCallOptions) => Promise<CustomFieldWriteResponse>;
+  getLeadCustomValues: (leadId: string, options?: RuntimeHttpCallOptions) => Promise<CustomFieldValuesResponse>;
+  setLeadCustomValues: (leadId: string, body: SetLeadCustomValuesInput, options?: RuntimeHttpCallOptions) => Promise<CustomFieldValuesWriteResponse>;
+  listContactsByTag: (tag: string, options?: RuntimeHttpCallOptions) => Promise<ContactsByTagResponse>;
+  addContactTag: (contactId: string, body: ContactTagInput, options?: RuntimeHttpCallOptions) => Promise<ContactTagsResponse>;
+  removeContactTag: (contactId: string, body: ContactTagInput, options?: RuntimeHttpCallOptions) => Promise<ContactTagsResponse>;
 };
 
 /** WU15 dev-only mode switch input: paused is handoff-only, never settable here. */
@@ -277,6 +303,27 @@ export function createDemoApi(baseUrl: string, fetcher?: DemoApiFetcher): DemoAp
       runtime.get("/v1/demo/agent/lead-fields", options ?? {}, parseLeadFieldsResponse),
     updateLeadFields: (body, options) =>
       runtime.put("/v1/demo/agent/lead-fields", body, options ?? {}, parseLeadFieldsWriteResponse),
+    listCustomFields: (options) =>
+      runtime.get("/v1/demo/agent/custom-fields", options ?? {}, parseCustomFieldDefinitionsResponse),
+    createCustomField: (body, options) =>
+      runtime.post("/v1/demo/agent/custom-fields", body, options ?? {}, parseCustomFieldWriteResponse),
+    updateCustomField: (fieldId, body, options) =>
+      runtime.put(`/v1/demo/agent/custom-fields/${encodeURIComponent(fieldId)}`, body, options ?? {}, parseCustomFieldWriteResponse),
+    deleteCustomField: (fieldId, options) =>
+      runtime.delete(`/v1/demo/agent/custom-fields/${encodeURIComponent(fieldId)}`, options ?? {}, parseCustomFieldWriteResponse),
+    getLeadCustomValues: (leadId, options) =>
+      runtime.get(`/v1/demo/agent/leads/${encodeURIComponent(leadId)}/custom-values`, options ?? {}, parseCustomFieldValuesResponse),
+    setLeadCustomValues: (leadId, body, options) =>
+      runtime.put(`/v1/demo/agent/leads/${encodeURIComponent(leadId)}/custom-values`, body, options ?? {}, parseCustomFieldValuesWriteResponse),
+    listContactsByTag: (tag, options) => {
+      const params = new URLSearchParams();
+      if (tag.trim()) params.set("tag", tag.trim());
+      return runtime.get(`/v1/demo/agent/contacts${params.toString() ? `?${params.toString()}` : ""}`, options ?? {}, parseContactsByTagResponse);
+    },
+    addContactTag: (contactId, body, options) =>
+      runtime.post(`/v1/demo/agent/contacts/${encodeURIComponent(contactId)}/tags`, body, options ?? {}, parseContactTagsResponse),
+    removeContactTag: (contactId, body, options) =>
+      runtime.delete(`/v1/demo/agent/contacts/${encodeURIComponent(contactId)}/tags`, options ?? {}, parseContactTagsResponse, body),
   };
 }
 

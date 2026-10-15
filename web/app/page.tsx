@@ -31,6 +31,7 @@ import {
 import { RuntimeHttpError } from "../runtime-client";
 import {
   AGENT_CONSOLE_ACTION_TYPES,
+  CUSTOM_FIELD_TYPES,
   KB_ARTICLE_CATEGORIES,
   LEAD_FIELD_COLUMNS,
 } from "../../contracts/runtime-v1";
@@ -42,7 +43,10 @@ import type {
   AgentPromptVersion,
   AgentSettings,
   AgentStateResponse,
+  ContactTagList,
   CrmInboxItem,
+  CustomFieldDefinition,
+  CustomFieldType,
   DemoContextResponse,
   KbSelfTestProbe,
 } from "../../contracts/runtime-v1";
@@ -171,6 +175,14 @@ const CONSOLE_ACTION_LABELS: Record<string, string> = {
   handoff_to_human: "Derivar a un humano",
 };
 
+// WU17: etiquetas en español neutro para los tipos de campo personalizado.
+const CUSTOM_FIELD_TYPE_LABELS: Record<string, string> = {
+  text: "Texto",
+  number: "Número",
+  select: "Selección",
+  date: "Fecha",
+};
+
 function errorText(error: unknown): string {
   if (error instanceof RuntimeHttpError) return `${error.status} · ${error.envelope.error.code}`;
   if (error instanceof Error) return error.message;
@@ -231,6 +243,16 @@ export default function DashboardPage(): React.ReactElement {
   const [editingKbId, setEditingKbId] = React.useState<string | null>(null);
   const [calendarConfig, setCalendarConfig] = React.useState<AgentCalendarConfig | null>(null);
   const [leadFields, setLeadFields] = React.useState<string[]>([]);
+  // WU17: campos personalizados + etiquetas de contactos (alcance derivado por
+  // el servidor). Carga y error independientes del resto de la consola.
+  const [customFields, setCustomFields] = React.useState<CustomFieldDefinition[]>([]);
+  const [customFieldsError, setCustomFieldsError] = React.useState<string | null>(null);
+  const [customFieldsLoading, setCustomFieldsLoading] = React.useState(false);
+  const [editingFieldId, setEditingFieldId] = React.useState<string | null>(null);
+  const [contacts, setContacts] = React.useState<ContactTagList[]>([]);
+  const [tagFilter, setTagFilter] = React.useState<string>("");
+  const [tagsNote, setTagsNote] = React.useState<string | null>(null);
+  const [tagsError, setTagsError] = React.useState<string | null>(null);
 
   const loadConsole = React.useCallback(async (client: DemoApi): Promise<void> => {
     setConsoleLoading(true);
@@ -261,6 +283,24 @@ export default function DashboardPage(): React.ReactElement {
     if (!api || view !== "agente") return;
     void loadConsole(api);
   }, [api, view, account?.client_account_id, loadConsole]);
+
+  const loadCustomFields = React.useCallback(async (client: DemoApi): Promise<void> => {
+    setCustomFieldsLoading(true);
+    setCustomFieldsError(null);
+    try {
+      const result = await client.listCustomFields();
+      setCustomFields(result.custom_fields.items);
+    } catch (error) {
+      setCustomFieldsError(consoleFailure(error));
+    } finally {
+      setCustomFieldsLoading(false);
+    }
+  }, []);
+
+  React.useEffect(() => {
+    if (!api || view !== "agente") return;
+    void loadCustomFields(api);
+  }, [api, view, account?.client_account_id, loadCustomFields]);
 
   const submitConsoleSettings = async (event: React.FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
@@ -420,9 +460,11 @@ export default function DashboardPage(): React.ReactElement {
   const submitCalendarConfig = async (event: React.FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
     if (!api || consoleBusy) return;
-    const form = new FormData(event.currentTarget);
+    const formEl = event.currentTarget;
+    const form = new FormData(formEl);
     const workingDays = [0, 1, 2, 3, 4, 5, 6].filter((day) => form.get(`day-${day}`) === "on");
     const labelRaw = String(form.get("destination_label") ?? "").trim();
+    const timezoneRaw = String(form.get("timezone") ?? "").trim();
     setConsoleBusy(true);
     setConsoleNote(null);
     try {
@@ -432,6 +474,7 @@ export default function DashboardPage(): React.ReactElement {
         slot_minutes: Number(String(form.get("slot_minutes") ?? "")),
         working_days: workingDays,
         destination_label: labelRaw ? labelRaw : null,
+        ...(timezoneRaw ? { timezone: timezoneRaw } : {}),
       });
       const fresh = await api.getCalendarConfig();
       setCalendarConfig(fresh.calendar_config);
@@ -457,6 +500,140 @@ export default function DashboardPage(): React.ReactElement {
       setConsoleNote("Campos guardados");
     } catch (error) {
       setConsoleNote(`Guardar campos falló: ${consoleFailure(error)}`);
+    } finally {
+      setConsoleBusy(false);
+    }
+  };
+
+  const submitCreateCustomField = async (event: React.FormEvent<HTMLFormElement>): Promise<void> => {
+    event.preventDefault();
+    if (!api || consoleBusy) return;
+    const formEl = event.currentTarget;
+    const form = new FormData(formEl);
+    const type = String(form.get("type") ?? "text") as CustomFieldType;
+    const choicesRaw = String(form.get("choices") ?? "").trim();
+    const choices = choicesRaw ? choicesRaw.split(",").map((c) => c.trim()).filter(Boolean) : undefined;
+    setConsoleBusy(true);
+    setConsoleNote(null);
+    try {
+      await api.createCustomField({
+        name: String(form.get("name") ?? ""),
+        type,
+        ...(type === "select" && choices ? { choices } : {}),
+      });
+      formEl.reset();
+      await loadCustomFields(api);
+      setConsoleNote("Campo personalizado creado");
+    } catch (error) {
+      setConsoleNote(`Crear campo falló: ${consoleFailure(error)}`);
+    } finally {
+      setConsoleBusy(false);
+    }
+  };
+
+  const submitEditCustomField = async (event: React.FormEvent<HTMLFormElement>, fieldId: string): Promise<void> => {
+    event.preventDefault();
+    if (!api || consoleBusy) return;
+    const form = new FormData(event.currentTarget);
+    const nameRaw = String(form.get("name") ?? "").trim();
+    const typeRaw = String(form.get("type") ?? "").trim();
+    const choicesRaw = String(form.get("choices") ?? "").trim();
+    const body: import("../../contracts/runtime-v1").UpdateCustomFieldInput = {};
+    if (nameRaw) body.name = nameRaw;
+    if (typeRaw) body.type = typeRaw as CustomFieldType;
+    const choices = choicesRaw ? choicesRaw.split(",").map((c) => c.trim()).filter(Boolean) : undefined;
+    if (choices) body.choices = choices;
+    setConsoleBusy(true);
+    setConsoleNote(null);
+    try {
+      await api.updateCustomField(fieldId, body);
+      setEditingFieldId(null);
+      await loadCustomFields(api);
+      setConsoleNote("Campo actualizado");
+    } catch (error) {
+      setConsoleNote(`Actualizar campo falló: ${consoleFailure(error)}`);
+    } finally {
+      setConsoleBusy(false);
+    }
+  };
+
+  const runDeleteCustomField = async (fieldId: string): Promise<void> => {
+    if (!api || consoleBusy) return;
+    setConsoleBusy(true);
+    setConsoleNote(null);
+    try {
+      await api.deleteCustomField(fieldId);
+      await loadCustomFields(api);
+      setConsoleNote("Campo eliminado");
+    } catch (error) {
+      setConsoleNote(`Eliminar campo falló: ${consoleFailure(error)}`);
+    } finally {
+      setConsoleBusy(false);
+    }
+  };
+
+  const submitTagFilter = async (event: React.FormEvent<HTMLFormElement>): Promise<void> => {
+    event.preventDefault();
+    if (!api || consoleBusy) return;
+    const form = new FormData(event.currentTarget);
+    const tag = String(form.get("tag") ?? "").trim();
+    if (!tag) {
+      setContacts([]);
+      setTagFilter("");
+      setTagsNote("Escribí una etiqueta para filtrar.");
+      return;
+    }
+    setConsoleBusy(true);
+    setTagsNote(null);
+    setTagsError(null);
+    try {
+      const result = await api.listContactsByTag(tag);
+      setContacts(result.contacts.items);
+      setTagFilter(tag);
+      setTagsNote(`${result.contacts.count} contacto(s) con la etiqueta «${tag}»`);
+    } catch (error) {
+      setContacts([]);
+      setTagsError(consoleFailure(error));
+    } finally {
+      setConsoleBusy(false);
+    }
+  };
+
+  const submitAddTag = async (event: React.FormEvent<HTMLFormElement>, contactId: string): Promise<void> => {
+    event.preventDefault();
+    if (!api || consoleBusy) return;
+    const formEl = event.currentTarget;
+    const form = new FormData(formEl);
+    const tag = String(form.get("tag") ?? "").trim();
+    if (!tag) return;
+    setConsoleBusy(true);
+    setTagsNote(null);
+    setTagsError(null);
+    try {
+      await api.addContactTag(contactId, { tag });
+      formEl.reset();
+      const fresh = await api.listContactsByTag(tagFilter);
+      setContacts(fresh.contacts.items);
+      setTagsNote("Etiqueta agregada");
+    } catch (error) {
+      setTagsError(consoleFailure(error));
+    } finally {
+      setConsoleBusy(false);
+    }
+  };
+
+  const runRemoveTag = async (contactId: string, tag: string): Promise<void> => {
+    if (!api || consoleBusy) return;
+    setConsoleBusy(true);
+    setTagsNote(null);
+    setTagsError(null);
+    try {
+      await api.removeContactTag(contactId, { tag });
+      const fresh = await api.listContactsByTag(tagFilter);
+      setContacts(fresh.contacts.items);
+      setTagsNote("Etiqueta quitada");
+    } catch (error) {
+      setTagsError(consoleFailure(error));
     } finally {
       setConsoleBusy(false);
     }
@@ -1567,6 +1744,7 @@ export default function DashboardPage(): React.ReactElement {
                   <label>Fin de la ventana<input name="window_end" aria-label="Fin de la ventana" defaultValue={calendarConfig.window_end} placeholder="18:00" /></label>
                   <label>Duración del turno (min)<input name="slot_minutes" aria-label="Duración del turno" type="number" defaultValue={calendarConfig.slot_minutes} /></label>
                   <label>Etiqueta de destino<input name="destination_label" aria-label="Etiqueta de destino" defaultValue={calendarConfig.destination_label ?? ""} placeholder="Oficina central" /></label>
+                  <label>Zona horaria<input name="timezone" aria-label="Zona horaria" defaultValue={calendarConfig.timezone ?? ""} placeholder="America/Argentina/Buenos_Aires" /></label>
                   <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }} role="group" aria-label="Días hábiles">
                     {[0, 1, 2, 3, 4, 5, 6].map((day) => (
                       <label key={day} style={{ display: "flex", gap: 4, alignItems: "center" }}>
@@ -1590,6 +1768,87 @@ export default function DashboardPage(): React.ReactElement {
                 </div>
                 <button className="ghost-btn" type="submit" disabled={consoleBusy}>Guardar campos</button>
               </form>
+              <h3>Campos personalizados</h3>
+              {customFieldsError ? <p className="empty-note"><code>{customFieldsError}</code></p> : null}
+              {customFieldsLoading ? <p className="empty-note">Cargando campos personalizados…</p> : null}
+              <form className="audit-filters" onSubmit={(e) => void submitCreateCustomField(e)} aria-label="Crear campo personalizado">
+                <label>Nombre<input name="name" aria-label="Nombre del campo" placeholder="barrio" /></label>
+                <label>Tipo
+                  <select name="type" aria-label="Tipo de campo" defaultValue="text">
+                    {CUSTOM_FIELD_TYPES.map((type) => <option key={type} value={type}>{CUSTOM_FIELD_TYPE_LABELS[type] ?? type}</option>)}
+                  </select>
+                </label>
+                <label>Opciones (tipo selección)<input name="choices" aria-label="Opciones" placeholder="Palermo, Belgrano (separadas por coma)" /></label>
+                <button className="ghost-btn" type="submit" disabled={consoleBusy}>Crear campo</button>
+              </form>
+              {customFields.length > 0 ? (
+                <table className="data-table">
+                  <thead><tr><th>Nombre</th><th>Tipo</th><th>Opciones</th><th>Acción</th></tr></thead>
+                  <tbody>
+                    {customFields.map((field) => (
+                      <tr key={field.id}>
+                        <td><strong>{field.name}</strong><br /><span className="mono">{field.id.slice(0, 8)}…</span></td>
+                        <td>{CUSTOM_FIELD_TYPE_LABELS[field.type] ?? field.type}</td>
+                        <td>{field.choices.length > 0 ? field.choices.join(", ") : "—"}</td>
+                        <td>
+                          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                            <button className="ghost-btn" disabled={consoleBusy} onClick={() => setEditingFieldId(editingFieldId === field.id ? null : field.id)}>Editar</button>
+                            <button className="ghost-btn danger" disabled={consoleBusy} onClick={() => void runDeleteCustomField(field.id)}>Eliminar</button>
+                          </div>
+                          {editingFieldId === field.id ? (
+                            <form className="audit-filters" onSubmit={(e) => void submitEditCustomField(e, field.id)} aria-label={`Editar campo ${field.name}`}>
+                              <label>Nombre<input name="name" aria-label="Nombre en edición" defaultValue={field.name} /></label>
+                              <label>Tipo
+                                <select name="type" aria-label="Tipo en edición" defaultValue={field.type}>
+                                  {CUSTOM_FIELD_TYPES.map((type) => <option key={type} value={type}>{CUSTOM_FIELD_TYPE_LABELS[type] ?? type}</option>)}
+                                </select>
+                              </label>
+                              <label>Opciones<input name="choices" aria-label="Opciones en edición" defaultValue={field.choices.join(", ")} /></label>
+                              <button className="ghost-btn" type="submit" disabled={consoleBusy}>Guardar campo</button>
+                            </form>
+                          ) : null}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              ) : null}
+              <h3>Etiquetas</h3>
+              <form className="audit-filters" onSubmit={(e) => void submitTagFilter(e)} aria-label="Filtrar contactos por etiqueta">
+                <label>Etiqueta<input name="tag" aria-label="Etiqueta para filtrar" placeholder="vip" defaultValue={tagFilter} /></label>
+                <button className="ghost-btn" type="submit" disabled={consoleBusy}>Filtrar etiquetas</button>
+              </form>
+              {tagsError ? <p className="empty-note"><code>{tagsError}</code></p> : null}
+              {tagsNote ? <p className="empty-note">{tagsNote}</p> : null}
+              {contacts.length > 0 ? (
+                <table className="data-table">
+                  <thead><tr><th>Contacto</th><th>Etiquetas</th><th>Acción</th></tr></thead>
+                  <tbody>
+                    {contacts.map((contact) => (
+                      <tr key={contact.id}>
+                        <td><strong>{contact.name}</strong><br /><span className="mono">{contact.id.slice(0, 8)}…</span></td>
+                        <td>
+                          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                            {contact.tags.map((tag) => (
+                              <span key={tag} className="status-pill">
+                                {tag}
+                                <button type="button" className="calendar-del" aria-label={`Quitar etiqueta ${tag}`} disabled={consoleBusy} onClick={() => void runRemoveTag(contact.id, tag)}>×</button>
+                              </span>
+                            ))}
+                            {contact.tags.length === 0 ? <span className="mono">sin etiquetas</span> : null}
+                          </div>
+                        </td>
+                        <td>
+                          <form className="audit-filters" onSubmit={(e) => void submitAddTag(e, contact.id)} aria-label={`Agregar etiqueta a ${contact.name}`}>
+                            <label>Nueva etiqueta<input name="tag" aria-label="Nueva etiqueta" placeholder="vip" /></label>
+                            <button className="ghost-btn" type="submit" disabled={consoleBusy}>Agregar</button>
+                          </form>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              ) : null}
             </section>
           </section>
         </section>

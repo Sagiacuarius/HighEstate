@@ -1218,7 +1218,12 @@ export const KB_ARTICLE_CATEGORIES: readonly string[] = [
   "visitas",
 ];
 
-/** The CHECK domain of agent_field_allowlist.column_name. */
+/**
+ * The fixed CHECK columns of agent_field_allowlist.column_name. WU17 widens
+ * the allowlist to also carry per-account custom field names, so the server is
+ * the authority for the read projection and these remain a client-side label
+ * reference only (no longer a parse gate).
+ */
 export const LEAD_FIELD_COLUMNS: readonly string[] = [
   "stage_id",
   "status",
@@ -1272,6 +1277,8 @@ export type AgentCalendarConfig = {
   slot_minutes: number;
   working_days: number[];
   destination_label: string | null;
+  /** WU17: resolved IANA zone (server fallback to the business constant). */
+  timezone: string | null;
   account_id: string;
 };
 
@@ -1345,6 +1352,7 @@ export type CalendarConfigWriteResponse = AgentConsoleBase & {
     slot_minutes: number;
     working_days: number[];
     destination_label: string | null;
+    timezone: string | null;
   };
 };
 
@@ -1388,6 +1396,7 @@ export type CalendarConfigInput = {
   slot_minutes?: number;
   working_days?: number[];
   destination_label?: string | null;
+  timezone?: string;
   idempotencyKey?: string;
 };
 
@@ -1640,12 +1649,21 @@ function reqWindow(value: unknown, label: string): string {
   return value;
 }
 
+function optTimezone(value: unknown, label: string): string | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "string" || !value.trim()) {
+    throw new Error(`Invalid ${label}: timezone must be a non-empty string`);
+  }
+  return value;
+}
+
 export function parseCalendarConfigResponse(value: unknown): CalendarConfigResponse {
   const { correlation, replayed, payload } = parseConsoleEnvelope(value, "calendar_config", "calendar config");
   for (const key of Object.keys(payload)) {
     if (
       key !== "window_start" && key !== "window_end" && key !== "slot_minutes" &&
-      key !== "working_days" && key !== "destination_label" && key !== "account_id"
+      key !== "working_days" && key !== "destination_label" && key !== "timezone" &&
+      key !== "account_id"
     ) {
       throw new Error(`Invalid calendar config key: unknown key "${key}"`);
     }
@@ -1668,6 +1686,7 @@ export function parseCalendarConfigResponse(value: unknown): CalendarConfigRespo
       slot_minutes: slot,
       working_days: days,
       destination_label: optStr(payload, "destination_label", "calendar config.destination_label"),
+      timezone: optTimezone(payload.timezone, "calendar config.timezone"),
       account_id: reqStr(payload, "account_id", "calendar config.account_id"),
     },
   };
@@ -1680,12 +1699,7 @@ export function parseLeadFieldsResponse(value: unknown): LeadFieldsResponse {
       throw new Error(`Invalid lead fields key: unknown key "${key}"`);
     }
   }
-  const allowed = reqStringList(payload.allowed, "lead fields.allowed");
-  for (const column of allowed) {
-    if (!LEAD_FIELD_COLUMNS.includes(column)) {
-      throw new Error(`Invalid lead fields.allowed entry: unknown column "${column}"`);
-    }
-  }
+  const allowed = parseAllowedColumns(payload.allowed, "lead fields.allowed");
   return {
     ...consoleBase(correlation, replayed),
     allowlist: {
@@ -1721,8 +1735,8 @@ function parseSlotMinutes(value: unknown, label: string): number {
 function parseAllowedColumns(value: unknown, label: string): string[] {
   const allowed = reqStringList(value, label);
   for (const column of allowed) {
-    if (!LEAD_FIELD_COLUMNS.includes(column)) {
-      throw new Error(`Invalid ${label} entry: unknown column "${column}"`);
+    if (!column.trim()) {
+      throw new Error(`Invalid ${label} entry: column name must be a non-empty string`);
     }
   }
   return allowed;
@@ -1805,7 +1819,7 @@ export function parseCalendarConfigWriteResponse(value: unknown): CalendarConfig
     if (
       key !== "resource_id" && key !== "window_start" && key !== "window_end" &&
       key !== "slot_minutes" && key !== "working_days" && key !== "destination_label" &&
-      key !== "correlation_id"
+      key !== "timezone" && key !== "correlation_id"
     ) {
       throw new Error(`Invalid calendar config write key: unknown key "${key}"`);
     }
@@ -1819,6 +1833,7 @@ export function parseCalendarConfigWriteResponse(value: unknown): CalendarConfig
       slot_minutes: parseSlotMinutes(payload.slot_minutes, "calendar config write.slot_minutes"),
       working_days: parseWorkingDays(payload.working_days, "calendar config write.working_days"),
       destination_label: optAbsentStr(payload, "destination_label", "calendar config write.destination_label"),
+      timezone: optTimezone(payload.timezone, "calendar config write.timezone"),
     },
   };
 }
@@ -1838,6 +1853,250 @@ export function parseLeadFieldsWriteResponse(value: unknown): LeadFieldsWriteRes
     },
   };
 }
+
+/**
+ * Configuration WU17 — custom fields, lead custom values, and contact tags
+ * (mirror api/routes/agent_wu14.py console routes). Every success envelope is
+ * the same {contract_version, environment: dev-only-agent, accepted, replayed,
+ * correlation_id, <resource>: payload}; scope is server-derived. Custom field
+ * names are account-dynamic, so only the fixed CHECK type domain is enumerable
+ * client-side.
+ */
+export const CUSTOM_FIELD_TYPES: readonly string[] = ["text", "number", "select", "date"];
+export type CustomFieldType = "text" | "number" | "select" | "date";
+
+export type CustomFieldDefinition = {
+  id: string;
+  name: string;
+  type: CustomFieldType;
+  choices: string[];
+};
+
+export type CustomFieldDefinitionsResponse = AgentConsoleBase & {
+  custom_fields: { count: number; items: CustomFieldDefinition[] };
+};
+
+export type CustomFieldValue = {
+  field_id: string;
+  name: string;
+  type: CustomFieldType;
+  value: string;
+};
+
+export type CustomFieldValuesResponse = AgentConsoleBase & {
+  custom_values: { lead_id: string; values: CustomFieldValue[] };
+};
+
+export type CustomFieldValuesWriteResponse = AgentConsoleBase & {
+  custom_values: { lead_id: string; values: CustomFieldValue[] };
+};
+
+export type ContactTagList = {
+  id: string;
+  name: string;
+  tags: string[];
+};
+
+export type ContactsByTagResponse = AgentConsoleBase & {
+  contacts: { count: number; items: ContactTagList[] };
+};
+
+export type ContactTagsResponse = AgentConsoleBase & {
+  tags: { contact_id: string; tags: string[] };
+};
+
+export type CustomFieldWriteResponse = AgentConsoleBase & {
+  custom_field: {
+    resource_id: string;
+    name: string | null;
+    type: CustomFieldType | null;
+    choices: string[] | null;
+  };
+};
+
+/** Write inputs — scope is server-derived; no account id appears here. */
+export type CreateCustomFieldInput = {
+  name: string;
+  type: CustomFieldType;
+  choices?: string[];
+  idempotencyKey?: string;
+};
+
+export type UpdateCustomFieldInput = {
+  name?: string;
+  type?: CustomFieldType;
+  choices?: string[];
+  idempotencyKey?: string;
+};
+
+export type SetLeadCustomValuesInput = {
+  values: Record<string, string | number>;
+  idempotencyKey?: string;
+};
+
+export type ContactTagInput = {
+  tag: string;
+  idempotencyKey?: string;
+};
+
+function reqCustomFieldType(value: unknown, label: string): CustomFieldType {
+  if (typeof value !== "string" || !CUSTOM_FIELD_TYPES.includes(value)) {
+    throw new Error(`Invalid ${label}: must be text|number|select|date`);
+  }
+  return value as CustomFieldType;
+}
+
+function optCustomFieldType(value: unknown, label: string): CustomFieldType | null {
+  if (value === undefined || value === null) return null;
+  return reqCustomFieldType(value, label);
+}
+
+function optStringList(value: unknown, label: string): string[] | null {
+  if (value === undefined || value === null) return null;
+  return reqStringList(value, label);
+}
+
+function parseCustomFieldDefinition(value: unknown, label: string): CustomFieldDefinition {
+  const record = reqRecord(value, label);
+  for (const key of Object.keys(record)) {
+    if (key !== "id" && key !== "name" && key !== "type" && key !== "choices") {
+      throw new Error(`Invalid ${label} key: unknown key "${key}"`);
+    }
+  }
+  return {
+    id: reqStr(record, "id", `${label}.id`),
+    name: reqStr(record, "name", `${label}.name`),
+    type: reqCustomFieldType(record.type, `${label}.type`),
+    choices: reqStringList(record.choices, `${label}.choices`),
+  };
+}
+
+export function parseCustomFieldDefinitionsResponse(value: unknown): CustomFieldDefinitionsResponse {
+  const { correlation, replayed, payload } = parseConsoleEnvelope(value, "custom_fields", "custom fields");
+  for (const key of Object.keys(payload)) {
+    if (key !== "count" && key !== "items") {
+      throw new Error(`Invalid custom fields key: unknown key "${key}"`);
+    }
+  }
+  const items = reqArray(payload.items, "custom fields.items")
+    .map((entry, index) => parseCustomFieldDefinition(entry, `custom field[${index}]`));
+  return {
+    ...consoleBase(correlation, replayed),
+    custom_fields: { count: reqNum(payload, "count", "custom fields.count"), items },
+  };
+}
+
+function parseCustomFieldValue(value: unknown, label: string): CustomFieldValue {
+  const record = reqRecord(value, label);
+  for (const key of Object.keys(record)) {
+    if (key !== "field_id" && key !== "name" && key !== "type" && key !== "value") {
+      throw new Error(`Invalid ${label} key: unknown key "${key}"`);
+    }
+  }
+  return {
+    field_id: reqStr(record, "field_id", `${label}.field_id`),
+    name: reqStr(record, "name", `${label}.name`),
+    type: reqCustomFieldType(record.type, `${label}.type`),
+    value: reqStr(record, "value", `${label}.value`),
+  };
+}
+
+function parseCustomValuesPayload(payload: Record<string, unknown>, label: string): {
+  lead_id: string;
+  values: CustomFieldValue[];
+} {
+  for (const key of Object.keys(payload)) {
+    if (key !== "lead_id" && key !== "values") {
+      throw new Error(`Invalid ${label} key: unknown key "${key}"`);
+    }
+  }
+  const values = reqArray(payload.values, `${label}.values`)
+    .map((entry, index) => parseCustomFieldValue(entry, `${label}.values[${index}]`));
+  return {
+    lead_id: reqStr(payload, "lead_id", `${label}.lead_id`),
+    values,
+  };
+}
+
+export function parseCustomFieldValuesResponse(value: unknown): CustomFieldValuesResponse {
+  const { correlation, replayed, payload } = parseConsoleEnvelope(value, "custom_values", "custom values");
+  return {
+    ...consoleBase(correlation, replayed),
+    custom_values: parseCustomValuesPayload(payload, "custom values"),
+  };
+}
+
+export function parseCustomFieldValuesWriteResponse(value: unknown): CustomFieldValuesWriteResponse {
+  const { correlation, replayed, payload } = parseConsoleEnvelope(value, "custom_values", "custom values write");
+  return {
+    ...consoleBase(correlation, replayed),
+    custom_values: parseCustomValuesPayload(payload, "custom values write"),
+  };
+}
+
+function parseContactTagList(value: unknown, label: string): ContactTagList {
+  const record = reqRecord(value, label);
+  for (const key of Object.keys(record)) {
+    if (key !== "id" && key !== "name" && key !== "tags") {
+      throw new Error(`Invalid ${label} key: unknown key "${key}"`);
+    }
+  }
+  return {
+    id: reqStr(record, "id", `${label}.id`),
+    name: reqStr(record, "name", `${label}.name`),
+    tags: reqStringList(record.tags, `${label}.tags`),
+  };
+}
+
+export function parseContactsByTagResponse(value: unknown): ContactsByTagResponse {
+  const { correlation, replayed, payload } = parseConsoleEnvelope(value, "contacts", "contacts by tag");
+  for (const key of Object.keys(payload)) {
+    if (key !== "count" && key !== "items") {
+      throw new Error(`Invalid contacts by tag key: unknown key "${key}"`);
+    }
+  }
+  const items = reqArray(payload.items, "contacts by tag.items")
+    .map((entry, index) => parseContactTagList(entry, `contact[${index}]`));
+  return {
+    ...consoleBase(correlation, replayed),
+    contacts: { count: reqNum(payload, "count", "contacts by tag.count"), items },
+  };
+}
+
+export function parseContactTagsResponse(value: unknown): ContactTagsResponse {
+  const { correlation, replayed, payload } = parseConsoleEnvelope(value, "tags", "contact tags");
+  for (const key of Object.keys(payload)) {
+    if (key !== "contact_id" && key !== "tags") {
+      throw new Error(`Invalid contact tags key: unknown key "${key}"`);
+    }
+  }
+  return {
+    ...consoleBase(correlation, replayed),
+    tags: {
+      contact_id: reqStr(payload, "contact_id", "contact tags.contact_id"),
+      tags: reqStringList(payload.tags, "contact tags.tags"),
+    },
+  };
+}
+
+export function parseCustomFieldWriteResponse(value: unknown): CustomFieldWriteResponse {
+  const { correlation, replayed, payload } = parseConsoleEnvelope(value, "custom_field", "custom field write");
+  for (const key of Object.keys(payload)) {
+    if (key !== "resource_id" && key !== "name" && key !== "type" && key !== "choices" && key !== "correlation_id") {
+      throw new Error(`Invalid custom field write key: unknown key "${key}"`);
+    }
+  }
+  return {
+    ...consoleBase(correlation, replayed),
+    custom_field: {
+      resource_id: reqStr(payload, "resource_id", "custom field write.resource_id"),
+      name: optAbsentStr(payload, "name", "custom field write.name"),
+      type: optCustomFieldType(payload.type, "custom field write.type"),
+      choices: optStringList(payload.choices, "custom field write.choices"),
+    },
+  };
+}
+
 /**
  * Scoped query cache key shared with api/queries/demo_cache.py.
  * Format mvp-demo:v1:{agencyId}:{clientAccountId}:{surface}:{qualifier} —

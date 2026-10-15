@@ -191,13 +191,17 @@ export class RuntimeHttpClient {
     return this.call(path, options, parse, { method: "PUT", body: JSON.stringify(body) });
   }
 
-  /** DELETE helper sharing the v1 envelope + correlation contract (WU13 calendar cancel). */
+  /** DELETE helper sharing the v1 envelope + correlation contract (WU13 calendar cancel, WU17 tags). */
   delete<T>(
     path: string,
     options: RuntimeHttpCallOptions,
     parse: (value: unknown) => T & { correlation_id: string },
+    body?: unknown,
   ): Promise<T> {
-    return this.call(path, options, parse, { method: "DELETE" });
+    return this.call(path, options, parse, {
+      method: "DELETE",
+      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+    });
   }
 }
 
