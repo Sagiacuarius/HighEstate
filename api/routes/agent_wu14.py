@@ -30,12 +30,18 @@ from api.adapters.postgres_agent_console import (
     ALL_CONSOLE_ACTION_TYPES,
     LEGACY_FIELD_ALLOWLIST,
     ConsoleSettings,
+    default_calendar_config,
     default_verdict,
     load_calendar_config,
     load_console_settings,
     load_field_allowlist,
     preview_prompt,
     score_question,
+)
+from api.adapters.postgres_configuration import (
+    list_contacts_by_tag,
+    load_custom_field_definitions,
+    load_custom_field_values,
 )
 from api.adapters.postgres_agent_drafts import (
     AgentDraftRepository,
@@ -81,6 +87,14 @@ from api.application.calendar_commands_wu13 import (
     CreateCalendarEventCommand,
     UpdateCalendarEventCommand,
 )
+from api.application.configuration_commands_wu17 import (
+    AddContactTagCommand,
+    CreateCustomFieldDefinitionCommand,
+    DeleteCustomFieldDefinitionCommand,
+    RemoveContactTagCommand,
+    SetLeadCustomFieldValueCommand,
+    UpdateCustomFieldDefinitionCommand,
+)
 from api.application.conversation_agent import ConversationAgent
 from api.application.crm_commands_wu5 import (
     CrmCommandDenied,
@@ -117,6 +131,7 @@ _NOT_FOUND_REASONS = frozenset({
     "conversation_not_found_in_scope", "contact_not_found_in_scope",
     "draft_not_found_in_scope",
     "prompt_version_not_found_in_scope", "kb_article_not_found_in_scope",
+    "custom_field_not_found_in_scope", "lead_not_found_in_scope",
 })
 _CONFLICT_REASONS = frozenset({"draft_not_proposed", "draft_not_approved"})
 
@@ -135,8 +150,12 @@ _KB_DELETE_KEYS = frozenset({"idempotencyKey"})
 _SELFTEST_KEYS = frozenset({"question"})
 _CALENDAR_KEYS = frozenset({"window_start", "window_end", "slot_minutes",
                             "working_days", "destination_label",
-                            "idempotencyKey"})
+                            "timezone", "idempotencyKey"})
 _ALLOWLIST_KEYS = frozenset({"allowed", "idempotencyKey"})
+_CUSTOM_FIELD_KEYS = frozenset({"name", "type", "choices", "idempotencyKey"})
+_CUSTOM_FIELD_DELETE_KEYS = frozenset({"idempotencyKey"})
+_CUSTOM_VALUES_KEYS = frozenset({"values", "idempotencyKey"})
+_TAGS_KEYS = frozenset({"tag", "idempotencyKey"})
 
 
 def _iso(value: datetime | None) -> str | None:
@@ -262,6 +281,21 @@ def _console_key(account_id: str, entity: str, raw: dict[str, Any],
         canonical, sort_keys=True, separators=(",", ":"),
         default=str).encode("utf-8")).hexdigest()[:24]
     return f"console:{account_id}:{entity}:{digest}"
+
+
+def _custom_value_key(account_id: str, raw: dict[str, Any], lead_id: str,
+                      field_id: str, value: Any) -> str:
+    """Per-field idempotency key for a multi-field custom-value upsert; a
+    client key is disambiguated by field_id, otherwise the digest covers the
+    full (lead, field, value) triple so an updated value is a new upsert."""
+    client = raw.get("idempotencyKey")
+    if isinstance(client, str) and client.strip():
+        return f"console:{account_id}:custom-value:{client.strip()}:{field_id}"
+    digest = hashlib.sha256(json.dumps(
+        {"lead_id": lead_id, "field_id": field_id, "value": value},
+        sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+        ).hexdigest()[:24]
+    return f"console:{account_id}:custom-value:{digest}"
 
 
 def _console_ok(correlation: str, resource: str, payload: dict[str, Any],
@@ -475,6 +509,12 @@ def build_agent_router(conn_kwargs: dict[str, Any], model_provider: Any | None =
     kb_deactivate_cmd = DeactivateKbArticleCommand(dict(conn_kwargs))
     calendar_cmd = UpdateCalendarConfigCommand(dict(conn_kwargs))
     allowlist_cmd = UpdateFieldAllowlistCommand(dict(conn_kwargs))
+    custom_field_create_cmd = CreateCustomFieldDefinitionCommand(dict(conn_kwargs))
+    custom_field_update_cmd = UpdateCustomFieldDefinitionCommand(dict(conn_kwargs))
+    custom_field_delete_cmd = DeleteCustomFieldDefinitionCommand(dict(conn_kwargs))
+    custom_field_set_cmd = SetLeadCustomFieldValueCommand(dict(conn_kwargs))
+    add_tag_cmd = AddContactTagCommand(dict(conn_kwargs))
+    remove_tag_cmd = RemoveContactTagCommand(dict(conn_kwargs))
 
     async def _context(request: Request, correlation: str):
         composition = request.app.state.demo_composition
@@ -1331,6 +1371,7 @@ def build_agent_router(conn_kwargs: dict[str, Any], model_provider: Any | None =
             "slot_minutes": config.slot_minutes,
             "working_days": sorted(config.working_days),
             "destination_label": config.destination_label,
+            "timezone": config.tz_name,
             "account_id": context.client_account.id,
         })
 
@@ -1352,13 +1393,16 @@ def build_agent_router(conn_kwargs: dict[str, Any], model_provider: Any | None =
                 working_days=raw.get("working_days"),
                 **({"destination_label": raw.get("destination_label")}
                    if "destination_label" in raw else {}),
+                **({"timezone": raw.get("timezone")}
+                   if "timezone" in raw else {}),
                 idempotency_key=_console_key(
                     account_id, "calendar", raw,
                     {"window_start": raw.get("window_start"),
                      "window_end": raw.get("window_end"),
                      "slot_minutes": raw.get("slot_minutes"),
                      "working_days": raw.get("working_days"),
-                     "destination_label": raw.get("destination_label")}))
+                     "destination_label": raw.get("destination_label"),
+                     "timezone": raw.get("timezone")}))
         except CrmCommandDenied as problem:
             return _denial(problem, correlation)
         except CrmCommandValidationError as problem:
@@ -1411,5 +1455,278 @@ def build_agent_router(conn_kwargs: dict[str, Any], model_provider: Any | None =
         composition.cache.invalidate_scope(context.agency.id, account_id)
         return _console_ok(correlation, "allowlist", outcome.payload,
                            replayed=outcome.replayed)
+
+    @router.get(f"{AGENT_PREFIX}/custom-fields")
+    async def list_custom_fields(request: Request):
+        correlation = request.state.correlation_id
+        context, error = await _context(request, correlation)
+        if error is not None:
+            return error
+        try:
+            definitions = await load_custom_field_definitions(context, runner)
+        except Exception:
+            definitions = []
+        return _console_ok(correlation, "custom_fields", {
+            "count": len(definitions),
+            "items": [{"id": d["id"], "name": d["name"], "type": d["type"],
+                       "choices": d["choices"]} for d in definitions],
+        })
+
+    @router.post(f"{AGENT_PREFIX}/custom-fields")
+    async def create_custom_field(request: Request):
+        correlation = request.state.correlation_id
+        context, error = await _context(request, correlation)
+        if error is not None:
+            return error
+        raw, error = await _console_body(request, correlation, _CUSTOM_FIELD_KEYS)
+        if error is not None:
+            return error
+        account_id = context.client_account.id
+        try:
+            outcome = await custom_field_create_cmd.execute_define(
+                context, name=raw.get("name"), type=raw.get("type"),
+                choices=raw.get("choices"),
+                idempotency_key=_console_key(
+                    account_id, "custom-field", raw,
+                    {"name": raw.get("name"), "type": raw.get("type"),
+                     "choices": raw.get("choices")}))
+        except CrmCommandDenied as problem:
+            return _denial(problem, correlation)
+        except CrmCommandValidationError as problem:
+            return envelope(400, "invalid_command", str(problem), correlation)
+        except IdempotencyConflict:
+            return envelope(409, "tenant_idempotency_conflict",
+                            "command idempotency conflict", correlation)
+        composition = request.app.state.demo_composition
+        composition.cache.invalidate_scope(context.agency.id, account_id)
+        return _console_ok(correlation, "custom_field", outcome.payload,
+                           replayed=outcome.replayed)
+
+    @router.put(f"{AGENT_PREFIX}/custom-fields/{{field_id}}")
+    async def update_custom_field(request: Request, field_id: str):
+        correlation = request.state.correlation_id
+        context, error = await _context(request, correlation)
+        if error is not None:
+            return error
+        raw, error = await _console_body(request, correlation, _CUSTOM_FIELD_KEYS)
+        if error is not None:
+            return error
+        if _uuid_or_none(field_id) is None:
+            return envelope(404, "resource_not_found",
+                            "resource is not available in this account scope",
+                            correlation)
+        account_id = context.client_account.id
+        try:
+            outcome = await custom_field_update_cmd.execute_update(
+                context, field_id=str(field_id), name=raw.get("name"),
+                type=raw.get("type"), choices=raw.get("choices"),
+                idempotency_key=_console_key(
+                    account_id, "custom-field", raw,
+                    {"field_id": str(field_id), "name": raw.get("name"),
+                     "type": raw.get("type"), "choices": raw.get("choices")}))
+        except CrmCommandDenied as problem:
+            return _denial(problem, correlation)
+        except CrmCommandValidationError as problem:
+            return envelope(400, "invalid_command", str(problem), correlation)
+        except IdempotencyConflict:
+            return envelope(409, "tenant_idempotency_conflict",
+                            "command idempotency conflict", correlation)
+        composition = request.app.state.demo_composition
+        composition.cache.invalidate_scope(context.agency.id, account_id)
+        return _console_ok(correlation, "custom_field", outcome.payload,
+                           replayed=outcome.replayed)
+
+    @router.delete(f"{AGENT_PREFIX}/custom-fields/{{field_id}}")
+    async def delete_custom_field(request: Request, field_id: str):
+        correlation = request.state.correlation_id
+        context, error = await _context(request, correlation)
+        if error is not None:
+            return error
+        raw, error = await _console_body(request, correlation,
+                                         _CUSTOM_FIELD_DELETE_KEYS)
+        if error is not None:
+            return error
+        if _uuid_or_none(field_id) is None:
+            return envelope(404, "resource_not_found",
+                            "resource is not available in this account scope",
+                            correlation)
+        account_id = context.client_account.id
+        try:
+            outcome = await custom_field_delete_cmd.execute_delete(
+                context, field_id=str(field_id),
+                idempotency_key=_console_key(
+                    account_id, "custom-field", raw,
+                    {"delete": str(field_id)}))
+        except CrmCommandDenied as problem:
+            return _denial(problem, correlation)
+        except CrmCommandValidationError as problem:
+            return envelope(400, "invalid_command", str(problem), correlation)
+        except IdempotencyConflict:
+            return envelope(409, "tenant_idempotency_conflict",
+                            "command idempotency conflict", correlation)
+        composition = request.app.state.demo_composition
+        composition.cache.invalidate_scope(context.agency.id, account_id)
+        return _console_ok(correlation, "custom_field", outcome.payload,
+                           replayed=outcome.replayed)
+
+    @router.get(f"{AGENT_PREFIX}/leads/{{lead_id}}/custom-values")
+    async def get_lead_custom_values(request: Request, lead_id: str):
+        correlation = request.state.correlation_id
+        context, error = await _context(request, correlation)
+        if error is not None:
+            return error
+        if _uuid_or_none(lead_id) is None:
+            return envelope(404, "resource_not_found",
+                            "resource is not available in this account scope",
+                            correlation)
+        rows = await runner.query(
+            "SELECT id FROM leads WHERE id = %s AND client_account_id = %s",
+            (lead_id, context.client_account.id))
+        if not rows:
+            return envelope(404, "resource_not_found",
+                            "resource is not available in this account scope",
+                            correlation)
+        values = await load_custom_field_values(context, runner, lead_id)
+        return _console_ok(correlation, "custom_values", {
+            "lead_id": lead_id,
+            "values": [{"field_id": v["field_id"], "name": v["name"],
+                        "type": v["type"], "value": v["value"]} for v in values],
+        })
+
+    @router.put(f"{AGENT_PREFIX}/leads/{{lead_id}}/custom-values")
+    async def put_lead_custom_values(request: Request, lead_id: str):
+        correlation = request.state.correlation_id
+        context, error = await _context(request, correlation)
+        if error is not None:
+            return error
+        if _uuid_or_none(lead_id) is None:
+            return envelope(404, "resource_not_found",
+                            "resource is not available in this account scope",
+                            correlation)
+        raw, error = await _console_body(request, correlation, _CUSTOM_VALUES_KEYS)
+        if error is not None:
+            return error
+        values = raw.get("values")
+        if not isinstance(values, dict):
+            return envelope(400, "invalid_command",
+                            "values must be an object", correlation)
+        account_id = context.client_account.id
+        try:
+            definitions = await load_custom_field_definitions(context, runner)
+        except Exception:
+            definitions = []
+        by_name = {d["name"]: d for d in definitions}
+        unknown = sorted(name for name in values if name not in by_name)
+        if unknown:
+            return envelope(400, "invalid_command",
+                            f"undefined custom field: {unknown}", correlation)
+        for name, value in values.items():
+            field_id = by_name[name]["id"]
+            try:
+                await custom_field_set_cmd.execute_set(
+                    context, lead_id=lead_id, field_id=field_id, value=value,
+                    idempotency_key=_custom_value_key(
+                        account_id, raw, lead_id, field_id, value))
+            except CrmCommandDenied as problem:
+                return _denial(problem, correlation)
+            except CrmCommandValidationError as problem:
+                return envelope(400, "invalid_command", str(problem), correlation)
+            except IdempotencyConflict:
+                return envelope(409, "tenant_idempotency_conflict",
+                                "command idempotency conflict", correlation)
+        composition = request.app.state.demo_composition
+        composition.cache.invalidate_scope(context.agency.id, account_id)
+        stored = await load_custom_field_values(context, runner, lead_id)
+        return _console_ok(correlation, "custom_values", {
+            "lead_id": lead_id,
+            "values": [{"field_id": v["field_id"], "name": v["name"],
+                        "type": v["type"], "value": v["value"]} for v in stored],
+        })
+
+    @router.get(f"{AGENT_PREFIX}/contacts")
+    async def list_contacts_by_tag_route(request: Request):
+        correlation = request.state.correlation_id
+        context, error = await _context(request, correlation)
+        if error is not None:
+            return error
+        tag = request.query_params.get("tag")
+        if tag is None or not tag.strip():
+            return envelope(400, "invalid_command",
+                            "tag query parameter is required", correlation)
+        try:
+            contacts = await list_contacts_by_tag(context, runner, tag.strip())
+        except Exception:
+            contacts = []
+        return _console_ok(correlation, "contacts", {
+            "count": len(contacts),
+            "items": [{"id": c["id"], "name": c["name"], "tags": c["tags"]}
+                      for c in contacts],
+        })
+
+    @router.post(f"{AGENT_PREFIX}/contacts/{{contact_id}}/tags")
+    async def add_contact_tag(request: Request, contact_id: str):
+        correlation = request.state.correlation_id
+        context, error = await _context(request, correlation)
+        if error is not None:
+            return error
+        if _uuid_or_none(contact_id) is None:
+            return envelope(404, "resource_not_found",
+                            "resource is not available in this account scope",
+                            correlation)
+        raw, error = await _console_body(request, correlation, _TAGS_KEYS)
+        if error is not None:
+            return error
+        account_id = context.client_account.id
+        try:
+            outcome = await add_tag_cmd.execute_add(
+                context, contact_id=str(contact_id), tag=raw.get("tag"),
+                idempotency_key=_console_key(
+                    account_id, "contact-tag", raw,
+                    {"contact_id": str(contact_id), "tag": raw.get("tag")}))
+        except CrmCommandDenied as problem:
+            return _denial(problem, correlation)
+        except CrmCommandValidationError as problem:
+            return envelope(400, "invalid_command", str(problem), correlation)
+        except IdempotencyConflict:
+            return envelope(409, "tenant_idempotency_conflict",
+                            "command idempotency conflict", correlation)
+        composition = request.app.state.demo_composition
+        composition.cache.invalidate_scope(context.agency.id, account_id)
+        return _console_ok(correlation, "tags", {
+            "contact_id": str(contact_id), "tags": outcome.payload["tags"]},
+            replayed=outcome.replayed)
+
+    @router.delete(f"{AGENT_PREFIX}/contacts/{{contact_id}}/tags")
+    async def remove_contact_tag(request: Request, contact_id: str):
+        correlation = request.state.correlation_id
+        context, error = await _context(request, correlation)
+        if error is not None:
+            return error
+        if _uuid_or_none(contact_id) is None:
+            return envelope(404, "resource_not_found",
+                            "resource is not available in this account scope",
+                            correlation)
+        raw, error = await _console_body(request, correlation, _TAGS_KEYS)
+        if error is not None:
+            return error
+        account_id = context.client_account.id
+        try:
+            outcome = await remove_tag_cmd.execute_remove(
+                context, contact_id=str(contact_id), tag=raw.get("tag"),
+                idempotency_key=_console_key(
+                    account_id, "contact-tag", raw,
+                    {"contact_id": str(contact_id), "tag": raw.get("tag")}))
+        except CrmCommandDenied as problem:
+            return _denial(problem, correlation)
+        except CrmCommandValidationError as problem:
+            return envelope(400, "invalid_command", str(problem), correlation)
+        except IdempotencyConflict:
+            return envelope(409, "tenant_idempotency_conflict",
+                            "command idempotency conflict", correlation)
+        composition = request.app.state.demo_composition
+        composition.cache.invalidate_scope(context.agency.id, account_id)
+        return _console_ok(correlation, "tags", {
+            "contact_id": str(contact_id), "tags": outcome.payload["tags"]},
+            replayed=outcome.replayed)
 
     return router

@@ -594,9 +594,19 @@ class UpdateCalendarConfigCommand(CrmCommandBase):
     async def _apply(self, context: TenantContext, cur: Any,
                      intent: dict[str, Any]) -> dict[str, Any]:
         account_id = context.client_account.id
+        # 010 added `timezone`; on a pre-010 base (no such column) the window
+        # still updates over the 009 columns and tz resolves to the constant
+        # (mirrors load_calendar_config's tolerant read).
         await cur.execute(
-            "SELECT window_start, window_end, slot_minutes, working_days, "
-            "timezone, destination_label FROM agent_calendar_config "
+            "SELECT 1 FROM information_schema.columns "
+            "WHERE table_name = 'agent_calendar_config' "
+            "AND column_name = 'timezone'")
+        has_timezone = await cur.fetchone() is not None
+        cols = ("window_start, window_end, slot_minutes, working_days, "
+                + ("timezone, " if has_timezone else "")
+                + "destination_label")
+        await cur.execute(
+            f"SELECT {cols} FROM agent_calendar_config "
             "WHERE client_account_id = %s",
             (account_id,),
         )
@@ -618,28 +628,49 @@ class UpdateCalendarConfigCommand(CrmCommandBase):
                       else None))
         if days is None:
             raise CrmCommandValidationError("working_days is required")
-        tz = (intent["timezone"] if intent["timezone"] is not None
-              else (current["timezone"] if current else None))
+        tz = None
+        if has_timezone:
+            tz = (intent["timezone"] if intent["timezone"] is not None
+                  else (current["timezone"] if current else None))
         label = (intent["destination_label"] if intent["label_set"]
                  else (current["destination_label"] if current else None))
-        await cur.execute(
-            """
-            INSERT INTO agent_calendar_config
-              (id, client_account_id, window_start, window_end,
-               slot_minutes, working_days, destination_label, timezone,
-               demo_seed_key)
-            VALUES (%s, %s, %s, %s, %s, %s::int[], %s, %s, NULL)
-            ON CONFLICT (client_account_id) DO UPDATE SET
-              window_start = EXCLUDED.window_start,
-              window_end = EXCLUDED.window_end,
-              slot_minutes = EXCLUDED.slot_minutes,
-              working_days = EXCLUDED.working_days,
-              destination_label = EXCLUDED.destination_label,
-              timezone = EXCLUDED.timezone
-            """,
-            (str(uuid4()), account_id, window[0], window[1],
-             slot, days, label, tz),
-        )
+        if has_timezone:
+            await cur.execute(
+                """
+                INSERT INTO agent_calendar_config
+                  (id, client_account_id, window_start, window_end,
+                   slot_minutes, working_days, destination_label, timezone,
+                   demo_seed_key)
+                VALUES (%s, %s, %s, %s, %s, %s::int[], %s, %s, NULL)
+                ON CONFLICT (client_account_id) DO UPDATE SET
+                  window_start = EXCLUDED.window_start,
+                  window_end = EXCLUDED.window_end,
+                  slot_minutes = EXCLUDED.slot_minutes,
+                  working_days = EXCLUDED.working_days,
+                  destination_label = EXCLUDED.destination_label,
+                  timezone = EXCLUDED.timezone
+                """,
+                (str(uuid4()), account_id, window[0], window[1],
+                 slot, days, label, tz),
+            )
+        else:
+            await cur.execute(
+                """
+                INSERT INTO agent_calendar_config
+                  (id, client_account_id, window_start, window_end,
+                   slot_minutes, working_days, destination_label,
+                   demo_seed_key)
+                VALUES (%s, %s, %s, %s, %s, %s::int[], %s, NULL)
+                ON CONFLICT (client_account_id) DO UPDATE SET
+                  window_start = EXCLUDED.window_start,
+                  window_end = EXCLUDED.window_end,
+                  slot_minutes = EXCLUDED.slot_minutes,
+                  working_days = EXCLUDED.working_days,
+                  destination_label = EXCLUDED.destination_label
+                """,
+                (str(uuid4()), account_id, window[0], window[1],
+                 slot, days, label),
+            )
         return {"resource_id": account_id,
                 "window_start": window[0], "window_end": window[1],
                 "slot_minutes": slot, "working_days": sorted(days),
