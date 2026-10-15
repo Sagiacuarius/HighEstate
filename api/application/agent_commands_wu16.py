@@ -29,6 +29,7 @@ from __future__ import annotations
 
 from typing import Any
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from api.application.agent_persona import AGENT_TONE, compose_prompt
 from api.application.agent_policy import AUTO_ACTION_TYPES, HANDOFF_ACTION
@@ -117,6 +118,21 @@ def _parse_hour(value: Any, name: str) -> int:
 
 def _format_window(total_minutes: int) -> str:
     return f"{total_minutes // 60:02d}:{total_minutes % 60:02d}"
+
+
+def _parse_timezone(value: Any) -> str:
+    """Validate an IANA timezone name; anything else fails closed (400)."""
+    if (isinstance(value, bool) or not isinstance(value, str)
+            or not value.strip()):
+        raise CrmCommandValidationError(
+            "timezone must be a non-empty IANA timezone string")
+    name = value.strip()
+    try:
+        ZoneInfo(name)
+    except Exception:
+        raise CrmCommandValidationError(
+            f"timezone {name!r} is not a valid IANA timezone") from None
+    return name
 
 
 class UpdateAgentSettingsCommand(CrmCommandBase):
@@ -514,12 +530,14 @@ class UpdateCalendarConfigCommand(CrmCommandBase):
                              window_start: Any = None, window_end: Any = None,
                              slot_minutes: Any = None,
                              working_days: Any = None,
+                             timezone: Any = None,
                              destination_label: Any = "__absent__",
                              idempotency_key: str = ""):
         if (window_start is None and window_end is None
                 and slot_minutes is None and working_days is None
-                and destination_label == "__absent__"):
+                and timezone is None and destination_label == "__absent__"):
             raise CrmCommandValidationError("nothing to update")
+        tz = _parse_timezone(timezone) if timezone is not None else None
         if (slot_minutes is not None
                 and (isinstance(slot_minutes, bool)
                      or not isinstance(slot_minutes, int)
@@ -561,12 +579,14 @@ class UpdateCalendarConfigCommand(CrmCommandBase):
                              "working_days": (sorted(working_days)
                                               if working_days is not None
                                               else None),
+                             "timezone": tz,
                              "destination_label": label
                              if destination_label != "__absent__" else None,
                              "label_set": destination_label != "__absent__"},
             window=window, slot_minutes=slot_minutes,
             working_days=(sorted(working_days)
                           if working_days is not None else None),
+            timezone=tz,
             destination_label=label,
             label_set=destination_label != "__absent__",
         )
@@ -576,7 +596,7 @@ class UpdateCalendarConfigCommand(CrmCommandBase):
         account_id = context.client_account.id
         await cur.execute(
             "SELECT window_start, window_end, slot_minutes, working_days, "
-            "destination_label FROM agent_calendar_config "
+            "timezone, destination_label FROM agent_calendar_config "
             "WHERE client_account_id = %s",
             (account_id,),
         )
@@ -598,28 +618,32 @@ class UpdateCalendarConfigCommand(CrmCommandBase):
                       else None))
         if days is None:
             raise CrmCommandValidationError("working_days is required")
+        tz = (intent["timezone"] if intent["timezone"] is not None
+              else (current["timezone"] if current else None))
         label = (intent["destination_label"] if intent["label_set"]
                  else (current["destination_label"] if current else None))
         await cur.execute(
             """
             INSERT INTO agent_calendar_config
               (id, client_account_id, window_start, window_end,
-               slot_minutes, working_days, destination_label, demo_seed_key)
-            VALUES (%s, %s, %s, %s, %s, %s::int[], %s, NULL)
+               slot_minutes, working_days, destination_label, timezone,
+               demo_seed_key)
+            VALUES (%s, %s, %s, %s, %s, %s::int[], %s, %s, NULL)
             ON CONFLICT (client_account_id) DO UPDATE SET
               window_start = EXCLUDED.window_start,
               window_end = EXCLUDED.window_end,
               slot_minutes = EXCLUDED.slot_minutes,
               working_days = EXCLUDED.working_days,
-              destination_label = EXCLUDED.destination_label
+              destination_label = EXCLUDED.destination_label,
+              timezone = EXCLUDED.timezone
             """,
             (str(uuid4()), account_id, window[0], window[1],
-             slot, days, label),
+             slot, days, label, tz),
         )
         return {"resource_id": account_id,
                 "window_start": window[0], "window_end": window[1],
                 "slot_minutes": slot, "working_days": sorted(days),
-                "destination_label": label,
+                "destination_label": label, "timezone": tz,
                 "correlation_id": context.correlation_id}
 
     @staticmethod

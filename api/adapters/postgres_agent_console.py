@@ -112,15 +112,37 @@ async def load_console_settings(context, runner: PostgresRunner) -> ConsoleSetti
 
 
 async def load_field_allowlist(context, runner: PostgresRunner) -> frozenset:
-    """Allowed lead columns for the context account (presence = allowed)."""
+    """Allowed lead columns for the context account (presence = allowed).
+
+    Returns fixed lead columns (stage_id/status/selected_property_id) plus the
+    names of any defined custom fields referenced via the 010
+    `field_definition_id` FK. A pre-010 base (no `field_definition_id` column,
+    no `custom_field_definitions` table) re-reads the bare 009 columns.
+    """
     account_id = _require(context)
-    rows = await runner.query(
-        "SELECT column_name FROM agent_field_allowlist WHERE client_account_id = %s",
-        (account_id,),
-    )
+    try:
+        rows = await runner.query(
+            "SELECT a.column_name, d.name AS custom_name "
+            "FROM agent_field_allowlist a "
+            "LEFT JOIN custom_field_definitions d ON d.id = a.field_definition_id "
+            "AND d.client_account_id = a.client_account_id "
+            "WHERE a.client_account_id = %s",
+            (account_id,),
+        )
+    except Exception:
+        rows = await runner.query(
+            "SELECT column_name FROM agent_field_allowlist "
+            "WHERE client_account_id = %s",
+            (account_id,),
+        )
     if not rows:
         return frozenset(LEGACY_FIELD_ALLOWLIST)
-    return frozenset(row["column_name"] for row in rows if row["column_name"])
+    names: set = set()
+    for row in rows:
+        name = row.get("custom_name") or row.get("column_name")
+        if name:
+            names.add(name)
+    return frozenset(names)
 
 
 def _parse_window_hour(value: Any, default: int) -> int:
@@ -137,21 +159,35 @@ def _parse_window_hour(value: Any, default: int) -> int:
 
 
 async def load_calendar_config(context, runner: PostgresRunner) -> CalendarConfig:
-    """Scheduling window for the context account (missing row -> constants)."""
+    """Scheduling window for the context account (missing row -> constants).
+
+    The 010 `timezone` column is read when present; NULL/absent falls back to
+    the BUSINESS_TIMEZONE constant. A pre-010 base (no `timezone` column) is
+    re-read over the 009 columns so the window still resolves with the constant
+    timezone.
+    """
     account_id = _require(context)
-    rows = await runner.query(
-        "SELECT window_start, window_end, slot_minutes, working_days, "
-        "destination_label FROM agent_calendar_config WHERE client_account_id = %s",
-        (account_id,),
-    )
+    try:
+        rows = await runner.query(
+            "SELECT window_start, window_end, slot_minutes, working_days, "
+            "timezone, destination_label FROM agent_calendar_config "
+            "WHERE client_account_id = %s",
+            (account_id,),
+        )
+    except Exception:
+        rows = await runner.query(
+            "SELECT window_start, window_end, slot_minutes, working_days, "
+            "destination_label FROM agent_calendar_config "
+            "WHERE client_account_id = %s",
+            (account_id,),
+        )
     if not rows:
         return default_calendar_config()
     row = rows[0]
     slot = row["slot_minutes"]
     days = row["working_days"]
-    # 009 carries no tz column: the business timezone is the code constant.
     return CalendarConfig(
-        tz_name=BUSINESS_TIMEZONE,
+        tz_name=row.get("timezone") or BUSINESS_TIMEZONE,
         start_hour=_parse_window_hour(row.get("window_start"), BUSINESS_START_HOUR),
         end_hour=_parse_window_hour(row.get("window_end"), BUSINESS_END_HOUR),
         slot_minutes=slot if isinstance(slot, int) and not isinstance(slot, bool) and slot > 0 else SLOT_MINUTES,

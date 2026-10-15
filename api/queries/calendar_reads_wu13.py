@@ -13,10 +13,12 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from api.adapters.postgres_agent_console import (
+    default_calendar_config,
+    load_calendar_config,
+)
 from api.adapters.postgres_calendar import CalendarEventRepository
 from api.domain.calendar_event import (
-    BUSINESS_TIMEZONE,
-    SLOT_MINUTES,
     CalendarEvent,
     business_slot_starts,
     overlaps,
@@ -105,14 +107,24 @@ class CalendarReadService:
             context, from_dt=from_dt, to_dt=to_dt, include_cancelled=False)
         busy_ranges = [(r.starts_at, r.ends_at) for r in busy
                        if r.starts_at is not None and r.ends_at is not None]
-        tz = ZoneInfo(BUSINESS_TIMEZONE)
-        step = timedelta(minutes=SLOT_MINUTES)
+        # UI availability and agent booking MUST agree on the scheduling
+        # window: read the console calendar config (tz/window/days/slot) and
+        # fall back to the module constants on pre-010 bases / missing rows.
+        try:
+            config = await load_calendar_config(context, self._runner)
+        except Exception:
+            config = default_calendar_config()
+        tz = ZoneInfo(config.tz_name)
+        step = timedelta(minutes=config.slot_minutes)
         first_day = from_dt.astimezone(tz).date()
         last_day = to_dt.astimezone(tz).date()
         slots: list[dict[str, str | None]] = []
         day: date = first_day
         while day <= last_day:
-            for start_local in business_slot_starts(day):
+            for start_local in business_slot_starts(
+                    day, tz_name=config.tz_name, start_hour=config.start_hour,
+                    end_hour=config.end_hour, slot_minutes=config.slot_minutes,
+                    working_days=config.working_days):
                 start_utc = start_local.astimezone(timezone.utc)
                 end_utc = start_utc + step
                 # slot must sit fully inside the requested window
