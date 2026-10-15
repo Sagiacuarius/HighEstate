@@ -47,9 +47,10 @@ from __future__ import annotations
 
 import asyncio
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import NAMESPACE_URL, uuid5
+from zoneinfo import ZoneInfo
 
 from fastapi.testclient import TestClient
 
@@ -69,6 +70,7 @@ from api.domain.calendar_event import (
     BUSINESS_DAYS,
     BUSINESS_END_HOUR,
     BUSINESS_START_HOUR,
+    BUSINESS_TIMEZONE,
     SLOT_MINUTES,
 )
 from api.identity.demo_identity import AbsentDemoIdentityAdapter, DemoIdentityAdapter
@@ -274,6 +276,33 @@ def http_scenarios() -> list[tuple[str, bool, str]]:
     assert cfg.get("dbname") == "production_runtime_mvp_wu16", (
         f"refusing to run on {cfg.get('dbname')}")
     assert not (sys.modules.get("langchain_openai")), "stub must stay import-free"
+    # Relative calendar dates (WU16 date-aging fix): the booking window is
+    # [datetime.now(), now + 7d], so the original hardcoded 2026-09-* dates no
+    # longer fall inside it once the system clock moves past them. Compute a
+    # Saturday (weekday-only escalation), a weekday (half-hour booking + the
+    # kill-switch 11:00 probe) and a second distinct weekday (restore booking)
+    # inside the window, then build the analyze bodies and the event lookups
+    # from those dates. Assertions keep their original intent unchanged.
+    _now = datetime.now(timezone.utc)
+    _tz = ZoneInfo(BUSINESS_TIMEZONE)
+    _today = _now.astimezone(_tz).date()
+
+    def _next_day(predicate):
+        for n in range(1, 8):
+            candidate = _today + timedelta(days=n)
+            if predicate(candidate.weekday()):
+                return candidate
+        raise AssertionError("no matching day within the 7-day window")
+
+    _sat = _next_day(lambda w: w == 5)
+    _wk_a = _next_day(lambda w: w in (0, 1, 2, 3, 4))
+    _wk_b = None
+    for n in range(1, 8):
+        candidate = _today + timedelta(days=n)
+        if candidate.weekday() in (0, 1, 2, 3, 4) and candidate != _wk_a:
+            _wk_b = candidate
+            break
+    assert _wk_b is not None, "no second weekday within the 7-day window"
     db = Sql(cfg)
     asyncio.run(db.open())
     try:
@@ -486,8 +515,9 @@ def http_scenarios() -> list[tuple[str, bool, str]]:
                   == "Agenda demo")
             record("K4 calendar override round-trips (10-16h/30m/wd-only)",
                    ok, f"slot={so4['calendar_config'].get('slot_minutes') if so4 else None}")
-            sat4 = _analyze(a, "quiero coordinar una visita el 2026-09-19 "
-                               "a las 10:00, por favor", "wu16-k4-sat")
+            sat4 = _analyze(a, f"quiero coordinar una visita el "
+                                f"{_sat.isoformat()} a las 10:00, por favor",
+                            "wu16-k4-sat")
             ds4 = (sat4.json().get("draft") or {})
             ok = (sat4.status_code == 200
                   and ds4.get("intent") == "schedule_visit"
@@ -495,15 +525,16 @@ def http_scenarios() -> list[tuple[str, bool, str]]:
                   and ds4.get("policy_decision") == "escalate")
             record("K4 Saturday booking escalates under weekdays-only", ok,
                    f"policy={ds4.get('policy_decision')}")
-            half4 = _analyze(a, "quiero coordinar una visita el 2026-09-21 "
-                                "a las 10:30, por favor", "wu16-k4-half")
+            half4 = _analyze(a, f"quiero coordinar una visita el "
+                                f"{_wk_a.isoformat()} a las 10:30, por favor",
+                            "wu16-k4-half")
             dh4 = (half4.json().get("draft") or {})
             models.add(dh4.get("model_name"))
             ev4 = asyncio.run(db.one(
                 "SELECT source FROM calendar_events WHERE client_account_id = %s "
                 "AND starts_at = %s AND status = 'scheduled'",
-                (ACCOUNT_A, datetime(2026, 9, 21, 13, 30,
-                                     tzinfo=timezone.utc))))
+                (ACCOUNT_A, datetime(_wk_a.year, _wk_a.month, _wk_a.day,
+                                     13, 30, tzinfo=timezone.utc))))
             ok = (half4.status_code == 200
                   and (half4.json().get("auto_executed") is True)
                   and dh4.get("status") == "executed"
@@ -596,15 +627,16 @@ def http_scenarios() -> list[tuple[str, bool, str]]:
                                        "idempotencyKey": "k6-kill"},
                          "wu16-k6-kill")
             assert console_ok(kill6, "wu16-k6-kill", "settings") is not None
-            sch6 = _analyze(a, "quiero coordinar una visita el 2026-09-21 "
-                               "a las 11:00, por favor", "wu16-k6-sch")
+            sch6 = _analyze(a, f"quiero coordinar una visita el "
+                               f"{_wk_a.isoformat()} a las 11:00, por favor",
+                            "wu16-k6-sch")
             dk6 = (sch6.json().get("draft") or {})
             models.add(dk6.get("model_name"))
             ev6 = asyncio.run(db.one(
                 "SELECT id FROM calendar_events WHERE client_account_id = %s "
                 "AND starts_at = %s AND status = 'scheduled'",
-                (ACCOUNT_A, datetime(2026, 9, 21, 14, 0,
-                                     tzinfo=timezone.utc))))
+                (ACCOUNT_A, datetime(_wk_a.year, _wk_a.month, _wk_a.day,
+                                     14, 0, tzinfo=timezone.utc))))
             ok = (sch6.status_code == 200
                   and dk6.get("intent") == "schedule_visit"
                   and dk6.get("status") == "proposed"
@@ -615,15 +647,16 @@ def http_scenarios() -> list[tuple[str, bool, str]]:
             unk6 = _put(a, SETTINGS, {"calendar_auto_enabled": True,
                                       "idempotencyKey": "k6-unkill"},
                           "wu16-k6-unkill")
-            book6 = _analyze(a, "quiero coordinar una visita el 2026-09-22 "
-                                "a las 10:00, por favor", "wu16-k6-book")
+            book6 = _analyze(a, f"quiero coordinar una visita el "
+                                f"{_wk_b.isoformat()} a las 10:00, por favor",
+                            "wu16-k6-book")
             bk6 = (book6.json().get("draft") or {})
             models.add(bk6.get("model_name"))
             ev6b = asyncio.run(db.one(
                 "SELECT source FROM calendar_events WHERE client_account_id = %s "
                 "AND starts_at = %s AND status = 'scheduled'",
-                (ACCOUNT_A, datetime(2026, 9, 22, 13, 0,
-                                     tzinfo=timezone.utc))))
+                (ACCOUNT_A, datetime(_wk_b.year, _wk_b.month, _wk_b.day,
+                                     13, 0, tzinfo=timezone.utc))))
             ok = (console_ok(unk6, "wu16-k6-unkill", "settings") is not None
                   and book6.status_code == 200
                   and bk6.get("status") == "executed"
