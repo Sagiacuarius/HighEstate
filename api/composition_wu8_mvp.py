@@ -74,6 +74,7 @@ RESET_FILE = _SQL_DIR / "mvp_reset.sql"
 SEED_008_FILE = _SQL_DIR / "mvp_seed_008.sql"
 SEED_009_FILE = _SQL_DIR / "mvp_seed_009.sql"
 SEED_010_FILE = _SQL_DIR / "mvp_seed_010.sql"
+SEED_011_FILE = _SQL_DIR / "mvp_seed_011.sql"
 # WU16 (agent-console, D3 fix) + WU17 (configuration): dashboard seed/reset
 # re-seeds the managed defaults (008 KB corpus + 009 console rows + 010
 # timezone) so reset no longer drops them. mvp_seed_005.sql stays harness-only;
@@ -84,12 +85,13 @@ SEED_010_FILE = _SQL_DIR / "mvp_seed_010.sql"
 # (timezone + custom-field tables). Older bases (ledger 006/007/009) must NOT
 # run a seed whose columns/tables they lack — so seeds are gated by the minimum
 # ledger version they require (see _managed_seed_for_ledger).
-MANAGED_SEED_FILES = [SEED_FILE, SEED_008_FILE, SEED_009_FILE, SEED_010_FILE]
+MANAGED_SEED_FILES = [SEED_FILE, SEED_008_FILE, SEED_009_FILE, SEED_010_FILE, SEED_011_FILE]
 _MANAGED_SEED_MIN_VERSION = {
     str(SEED_FILE): 1,
     str(SEED_008_FILE): 8,
     str(SEED_009_FILE): 9,
     str(SEED_010_FILE): 10,
+    str(SEED_011_FILE): 11,
 }
 
 
