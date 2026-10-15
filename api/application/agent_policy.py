@@ -47,7 +47,9 @@ HANDOFF_ACTION = "handoff_to_human"
 TRANSITION_ACTION = "transition_lead"
 
 # OD-1 default: calendar writes AUTO-include; the whitelist covers grounded
-# replies, interest, follow-ups, resolved transitions, and calendar writes.
+# replies, interest, follow-ups, resolved transitions, calendar writes, and
+# (change: agent-custom-field-writes) deterministically extracted custom-field
+# values, which ride the intent's existing verdict.
 AUTO_ACTION_TYPES = frozenset({
     SEND_REPLY_ACTION,
     "register_interest",
@@ -55,6 +57,7 @@ AUTO_ACTION_TYPES = frozenset({
     TRANSITION_ACTION,
     "create_event",
     "reschedule_event",
+    "set_custom_field_value",
 })
 
 # Calendar writes are the gated subset: re-gated by the kill-switch below.

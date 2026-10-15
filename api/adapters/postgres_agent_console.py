@@ -145,6 +145,30 @@ async def load_field_allowlist(context, runner: PostgresRunner) -> frozenset:
     return frozenset(names)
 
 
+async def load_signal_bindings(context, runner: PostgresRunner) -> dict:
+    """Signal -> field-definition bindings for the context account.
+
+    Returns {signal_key: field_definition_id}. A pre-011 base (no
+    `agent_signal_bindings` table) yields {} — the tolerant read mirrors the
+    calendar-config pattern (missing surface behaves as today: no bindings,
+    so the agent emits no `set_custom_field_value`).
+    """
+    account_id = _require(context)
+    try:
+        rows = await runner.query(
+            "SELECT signal_key, field_definition_id FROM agent_signal_bindings "
+            "WHERE client_account_id = %s",
+            (account_id,),
+        )
+    except Exception:
+        return {}
+    bindings: dict = {}
+    for row in rows:
+        if row.get("signal_key"):
+            bindings[row["signal_key"]] = str(row["field_definition_id"])
+    return bindings
+
+
 def _parse_window_hour(value: Any, default: int) -> int:
     if value is None:
         return default

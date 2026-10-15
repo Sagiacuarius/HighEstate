@@ -697,11 +697,17 @@ class UpdateFieldAllowlistCommand(CrmCommandBase):
     outbox_event_type = "AgentFieldAllowlistUpdated"
 
     async def execute_update(self, context: TenantContext | None, *,
-                             allowed: Any, idempotency_key: str):
+                              allowed: Any, idempotency_key: str):
         if not isinstance(allowed, list):
             raise CrmCommandValidationError("allowed must be a list")
         for column in allowed:
-            if column not in ALLOWLIST_COLUMNS:
+            # Fixed columns keep the 009 domain; anything else must be a
+            # plausible defined custom-field name (scoped existence is
+            # resolved in-transaction in _apply; unknown names fail 400).
+            if column in ALLOWLIST_COLUMNS:
+                continue
+            if (isinstance(column, bool) or not isinstance(column, str)
+                    or not column.strip() or len(column.strip()) > 100):
                 raise CrmCommandValidationError(
                     "allowed contains an unknown column")
         unique = sorted(set(allowed))
@@ -713,18 +719,61 @@ class UpdateFieldAllowlistCommand(CrmCommandBase):
     async def _apply(self, context: TenantContext, cur: Any,
                      intent: dict[str, Any]) -> dict[str, Any]:
         account_id = context.client_account.id
+        # 010 added `field_definition_id`; on a pre-010 base (no such column)
+        # custom names cannot be stored, so they fail closed exactly as the
+        # 009 domain did (mirrors the UpdateCalendarConfigCommand tolerant
+        # read).
+        await cur.execute(
+            "SELECT 1 FROM information_schema.columns "
+            "WHERE table_name = 'agent_field_allowlist' "
+            "AND column_name = 'field_definition_id'")
+        has_field_ref = await cur.fetchone() is not None
         await cur.execute(
             "DELETE FROM agent_field_allowlist WHERE client_account_id = %s",
             (account_id,),
         )
         for column in intent["allowed"]:
+            if column in ALLOWLIST_COLUMNS:
+                if has_field_ref:
+                    await cur.execute(
+                        """
+                        INSERT INTO agent_field_allowlist
+                          (id, client_account_id, column_name,
+                           field_definition_id, demo_seed_key)
+                        VALUES (%s, %s, %s, NULL, NULL)
+                        """,
+                        (str(uuid4()), account_id, column),
+                    )
+                else:
+                    await cur.execute(
+                        """
+                        INSERT INTO agent_field_allowlist
+                          (id, client_account_id, column_name, demo_seed_key)
+                        VALUES (%s, %s, %s, NULL)
+                        """,
+                        (str(uuid4()), account_id, column),
+                    )
+                continue
+            if not has_field_ref:
+                raise CrmCommandValidationError(
+                    "allowed contains an unknown column")
+            await cur.execute(
+                "SELECT id FROM custom_field_definitions "
+                "WHERE client_account_id = %s AND name = %s",
+                (account_id, column),
+            )
+            definition = await cur.fetchone()
+            if definition is None:
+                raise CrmCommandValidationError(
+                    "allowed contains an unknown column")
             await cur.execute(
                 """
                 INSERT INTO agent_field_allowlist
-                  (id, client_account_id, column_name, demo_seed_key)
-                VALUES (%s, %s, %s, NULL)
+                  (id, client_account_id, column_name,
+                   field_definition_id, demo_seed_key)
+                VALUES (%s, %s, %s, %s, NULL)
                 """,
-                (str(uuid4()), account_id, column),
+                (str(uuid4()), account_id, column, definition["id"]),
             )
         return {"resource_id": account_id, "allowed": list(intent["allowed"]),
                 "correlation_id": context.correlation_id}
