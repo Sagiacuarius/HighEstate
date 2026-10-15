@@ -78,7 +78,19 @@ SEED_010_FILE = _SQL_DIR / "mvp_seed_010.sql"
 # re-seeds the managed defaults (008 KB corpus + 009 console rows + 010
 # timezone) so reset no longer drops them. mvp_seed_005.sql stays harness-only;
 # harness SEED_FILES stay independent of this list.
+#
+# Each managed seed beyond the base requires its migration's schema: 008 (KB
+# table + stage markers), 009 (console tables + KB deactivated_at), 010
+# (timezone + custom-field tables). Older bases (ledger 006/007/009) must NOT
+# run a seed whose columns/tables they lack — so seeds are gated by the minimum
+# ledger version they require (see _managed_seed_for_ledger).
 MANAGED_SEED_FILES = [SEED_FILE, SEED_008_FILE, SEED_009_FILE, SEED_010_FILE]
+_MANAGED_SEED_MIN_VERSION = {
+    str(SEED_FILE): 1,
+    str(SEED_008_FILE): 8,
+    str(SEED_009_FILE): 9,
+    str(SEED_010_FILE): 10,
+}
 
 
 class DemoCompositionWU8Mvp:
@@ -130,6 +142,31 @@ async def _run_demo_script(conn_kwargs: dict, path: Path) -> None:
             await cur.execute(body)
     finally:
         await conn.close()
+
+
+async def _managed_seed_for_ledger(conn_kwargs: dict) -> list[Path]:
+    """Managed seeds applicable to THIS base's migration ledger.
+
+    Managed seeds beyond the base each assume a specific schema (008 KB, 009
+    console, 010 timezone/custom-fields). A base whose ledger predates a seed
+    must skip it (its columns/tables don't exist) rather than fail the whole
+    reset. The base seed + reset always apply.
+    """
+    try:
+        conn = await psycopg.AsyncConnection.connect(**conn_kwargs, autocommit=True)
+        try:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT max(version::int) FROM migration_ledger")
+                row = await cur.fetchone()
+        finally:
+            await conn.close()
+    except Exception:
+        # No ledger table yet (pre-runner base): only the base seed is safe.
+        row = (0,)
+    max_version = int(row[0]) if row and row[0] is not None else 0
+    return [p for p in MANAGED_SEED_FILES
+            if _MANAGED_SEED_MIN_VERSION.get(str(p), 1) <= max_version]
 
 
 def create_mvp_dashboard_app(
@@ -346,11 +383,13 @@ def create_mvp_dashboard_app(
 
     @app.post(SEED_ROUTE)
     async def seed(request: Request):
-        return await _guarded_script(request, MANAGED_SEED_FILES, "seeded")
+        managed = await _managed_seed_for_ledger(composition.conn_kwargs)
+        return await _guarded_script(request, managed, "seeded")
 
     @app.post(RESET_ROUTE)
     async def reset(request: Request):
-        return await _guarded_script(request, [RESET_FILE] + MANAGED_SEED_FILES, "reset",
+        managed = await _managed_seed_for_ledger(composition.conn_kwargs)
+        return await _guarded_script(request, [RESET_FILE] + managed, "reset",
                                      effect_aware=True)
 
     # WU9: dev-only simulator (mounted router shares this app's session state;
