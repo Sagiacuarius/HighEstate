@@ -49,6 +49,7 @@ from api.queries.demo_cache import ScopedQueryCache, build_scoped_key
 from api.routes.audit_screen_wu12 import build_audit_screen_router
 from api.routes.agent_wu14 import build_agent_router
 from api.routes.calendar_wu13 import build_calendar_router
+from api.routes.pipeline_wu19 import build_pipeline_router
 from api.routes.simulator_wu9 import (
     build_simulator_router,
     clear_simulator_effects,
@@ -413,6 +414,11 @@ def create_mvp_dashboard_app(
     # deterministic stub); no accepted route is modified.
     app.include_router(build_agent_router(composition.conn_kwargs),
                        prefix=DEMO_PREFIX, tags=["conversational-agent"])
+
+    # WU19: commercial pipelines (advisor pipeline/stage writes; same mount
+    # precedent; the accepted GET /v1/demo/pipeline route above is untouched).
+    app.include_router(build_pipeline_router(composition.conn_kwargs),
+                       prefix=DEMO_PREFIX, tags=["commercial-pipelines"])
 
     @app.exception_handler(404)
     async def not_found(request: Request, exc):
