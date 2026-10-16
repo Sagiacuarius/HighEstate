@@ -263,6 +263,47 @@ export type CrmPropertyView = {
 export type CrmPropertiesResponse = CrmReadMeta & { items: CrmPropertyView[]; count: number };
 export type CrmPropertyDetailResponse = CrmReadMeta & CrmPropertyView;
 
+export type PropertyCreateInput = {
+  title: string;
+  operation_type?: "sale" | "rent" | "temporary_rent";
+  status?: "capturing" | "available" | "reserved" | "sold" | "rented" | "paused";
+  price_amount: string | number;
+  price_currency?: "USD" | "ARS";
+  property_type?: "apartment" | "house" | "ph" | "land" | "office" | "commercial" | "warehouse";
+  address?: string; neighborhood?: string; city?: string;
+  rooms?: number; bathrooms?: number; parking_spaces?: number;
+  covered_area_m2?: string | number; total_area_m2?: string | number;
+  reference_code?: string; amenity_ids?: string[];
+};
+
+export type PropertyUpdateInput = Partial<Omit<PropertyCreateInput, "status" | "amenity_ids">>;
+export type PropertyWriteResponse = {
+  contract_version: typeof RUNTIME_CONTRACT_VERSION;
+  environment: "dev-only-property-catalog";
+  accepted: true;
+  replayed: boolean;
+  correlation_id: CorrelationId;
+  result: { resource_id: string; reference_code?: string | null; status?: string; operation_type?: string; changed_fields?: string[]; correlation_id: string };
+};
+
+function strictKeys(record: Record<string, unknown>, allowed: readonly string[], label: string): void {
+  for (const key of Object.keys(record)) if (!allowed.includes(key)) throw new Error(`Invalid ${label} key: unknown key "${key}"`);
+}
+
+export function parsePropertyWriteResponse(value: unknown): PropertyWriteResponse {
+  const record = reqRecord(value, "property write response");
+  strictKeys(record, ["contract_version", "environment", "accepted", "replayed", "correlation_id", "result"], "property write response");
+  if (record.contract_version !== RUNTIME_CONTRACT_VERSION || record.environment !== "dev-only-property-catalog" || record.accepted !== true || typeof record.replayed !== "boolean") throw new Error("Invalid property write response");
+  const correlation = reqStr(record, "correlation_id", "property write correlation_id");
+  correlationId(correlation);
+  const result = reqRecord(record.result, "property write result");
+  strictKeys(result, ["resource_id", "reference_code", "status", "operation_type", "changed_fields", "correlation_id"], "property write result");
+  const resultCorrelation = reqStr(result, "correlation_id", "property result correlation_id");
+  if (resultCorrelation !== correlation) throw new Error("Invalid property result correlation_id");
+  if (result.changed_fields !== undefined && (!Array.isArray(result.changed_fields) || result.changed_fields.some((item) => typeof item !== "string"))) throw new Error("Invalid property result changed_fields");
+  return { contract_version: RUNTIME_CONTRACT_VERSION, environment: "dev-only-property-catalog", accepted: true, replayed: record.replayed, correlation_id: correlation as CorrelationId, result: result as PropertyWriteResponse["result"] };
+}
+
 export type CrmPipelineView = {
   pipeline_id: string;
   name: string;

@@ -40,6 +40,7 @@ import {
   parseCrmMessagesResponse,
   parseCrmPipelineResponse,
   parseCrmPropertiesResponse,
+  parsePropertyWriteResponse,
   parseDemoContextResponse,
   parseDemoControlsResponse,
   parseDemoSimulateResponse,
@@ -92,6 +93,9 @@ import {
   type CrmMessagesResponse,
   type CrmPipelineResponse,
   type CrmPropertiesResponse,
+  type PropertyCreateInput,
+  type PropertyUpdateInput,
+  type PropertyWriteResponse,
   type DemoContextResponse,
   type DemoControlsResponse,
   type DemoSimulateResponse,
@@ -151,6 +155,8 @@ export type DemoApi = {
   messages: (conversationId: string, options?: RuntimeHttpCallOptions) => Promise<CrmMessagesResponse>;
   leads: (options?: RuntimeHttpCallOptions) => Promise<CrmLeadsResponse>;
   properties: (options?: RuntimeHttpCallOptions) => Promise<CrmPropertiesResponse>;
+  createProperty: (body: PropertyCreateInput, options?: RuntimeHttpCallOptions) => Promise<PropertyWriteResponse>;
+  updateProperty: (propertyId: string, body: PropertyUpdateInput, options?: RuntimeHttpCallOptions) => Promise<PropertyWriteResponse>;
   pipeline: (options?: RuntimeHttpCallOptions) => Promise<CrmPipelineResponse>;
   agenda: (options?: RuntimeHttpCallOptions) => Promise<CrmAgendaResponse>;
   activity: (options?: RuntimeHttpCallOptions) => Promise<CrmActivityResponse>;
@@ -247,6 +253,8 @@ export function createDemoApi(baseUrl: string, fetcher?: DemoApiFetcher): DemoAp
       ),
     leads: (options) => runtime.get("/v1/demo/leads", options ?? {}, parseCrmLeadsResponse),
     properties: (options) => runtime.get("/v1/demo/properties", options ?? {}, parseCrmPropertiesResponse),
+    createProperty: (body, options) => runtime.post("/v1/demo/properties", body, options ?? {}, parsePropertyWriteResponse),
+    updateProperty: (propertyId, body, options) => runtime.put(`/v1/demo/properties/${encodeURIComponent(propertyId)}`, body, options ?? {}, parsePropertyWriteResponse),
     pipeline: (options) => runtime.get("/v1/demo/pipeline", options ?? {}, parseCrmPipelineResponse),
     agenda: (options) => runtime.get("/v1/demo/agenda", options ?? {}, parseCrmAgendaResponse),
     activity: (options) => runtime.get("/v1/demo/activity", options ?? {}, parseCrmActivityResponse),

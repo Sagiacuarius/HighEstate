@@ -50,9 +50,20 @@ import {
   parsePipelineStageDeleteDenial,
   parseLivenessResponse,
   parseReadinessResponse,
+  parsePropertyWriteResponse,
 } from "./runtime-v1";
 
 describe("runtime v1 contracts", () => {
+  it("strictly parses property write outcomes", () => {
+    const payload = {
+      contract_version: "v1", environment: "dev-only-property-catalog", accepted: true,
+      replayed: false, correlation_id: "c1",
+      result: { resource_id: "p1", reference_code: null, status: "capturing", operation_type: "sale", correlation_id: "c1" },
+    };
+    expect(parsePropertyWriteResponse(payload).result.resource_id).toBe("p1");
+    expect(() => parsePropertyWriteResponse({ ...payload, extra: true })).toThrow(/unknown key/);
+    expect(() => parsePropertyWriteResponse({ ...payload, result: { ...payload.result, extra: true } })).toThrow(/unknown key/);
+  });
   it("validates correlation and idempotency values with shared limits", () => {
     expect(correlationId("corr-1")).toBe("corr-1");
     expect(idempotencyKey("idem-1")).toBe("idem-1");

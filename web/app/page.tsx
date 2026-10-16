@@ -277,6 +277,9 @@ export default function DashboardPage(): React.ReactElement {
   const [pipelineNote, setPipelineNote] = React.useState<string | null>(null);
   const [confirmDeleteStageId, setConfirmDeleteStageId] = React.useState<string | null>(null);
   const [warnedStageIds, setWarnedStageIds] = React.useState<string[]>([]);
+  const [propertyBusy, setPropertyBusy] = React.useState(false);
+  const [propertyNote, setPropertyNote] = React.useState<string | null>(null);
+  const [editingPropertyId, setEditingPropertyId] = React.useState<string | null>(null);
 
   const loadConsole = React.useCallback(async (client: DemoApi): Promise<void> => {
     setConsoleLoading(true);
@@ -735,6 +738,43 @@ export default function DashboardPage(): React.ReactElement {
     },
     [],
   );
+
+  const propertyFormBody = (form: FormData): Record<string, unknown> => {
+    const body: Record<string, unknown> = {};
+    for (const field of ["title", "operation_type", "status", "price_currency", "property_type", "address", "neighborhood", "city", "reference_code"]) {
+      const value = String(form.get(field) ?? "").trim();
+      if (value) body[field] = value;
+    }
+    for (const field of ["price_amount", "rooms", "bathrooms", "parking_spaces", "covered_area_m2", "total_area_m2"]) {
+      const value = String(form.get(field) ?? "").trim();
+      if (value) body[field] = field === "price_amount" || field.includes("area") ? value : Number(value);
+    }
+    return body;
+  };
+
+  const submitCreateProperty = async (event: React.FormEvent<HTMLFormElement>): Promise<void> => {
+    event.preventDefault();
+    if (!api || propertyBusy) return;
+    const formEl = event.currentTarget;
+    const body = propertyFormBody(new FormData(formEl));
+    if (typeof body.title !== "string" || !body.title || body.price_amount === undefined) {
+      setPropertyNote("Título y precio son obligatorios."); return;
+    }
+    setPropertyBusy(true); setPropertyNote(null);
+    try { await api.createProperty(body as Parameters<DemoApi["createProperty"]>[0]); formEl.reset(); await reload(api); setPropertyNote("Propiedad creada"); }
+    catch (error) { setPropertyNote(`Crear propiedad falló: ${consoleFailure(error)}`); }
+    finally { setPropertyBusy(false); }
+  };
+
+  const submitUpdateProperty = async (event: React.FormEvent<HTMLFormElement>, propertyId: string): Promise<void> => {
+    event.preventDefault();
+    if (!api || propertyBusy) return;
+    const body = propertyFormBody(new FormData(event.currentTarget));
+    setPropertyBusy(true); setPropertyNote(null);
+    try { await api.updateProperty(propertyId, body as Parameters<DemoApi["updateProperty"]>[1]); setEditingPropertyId(null); await reload(api); setPropertyNote("Propiedad actualizada"); }
+    catch (error) { setPropertyNote(`Actualizar propiedad falló: ${consoleFailure(error)}`); }
+    finally { setPropertyBusy(false); }
+  };
 
   // WU19: mutaciones del Embudo (alcance derivado por el servidor; ningún
   // payload lleva ids de cuenta). Cada éxito refresca la lectura del embudo;
@@ -1607,6 +1647,19 @@ export default function DashboardPage(): React.ReactElement {
             {data.properties ? (
               <section className="panel">
                 <div className="panel-heading"><div><p className="eyebrow">Catálogo</p><h2>Propiedades · {data.properties.count}</h2></div></div>
+                {propertyNote ? <p className="empty-note"><code>{propertyNote}</code></p> : null}
+                <form className="audit-filters property-form" onSubmit={(e) => void submitCreateProperty(e)} aria-label="Crear propiedad">
+                  <label>Título<input name="title" required placeholder="Departamento en Palermo" /></label>
+                  <label>Operación<select name="operation_type" defaultValue="sale"><option value="sale">Venta</option><option value="rent">Alquiler</option><option value="temporary_rent">Alquiler temporario</option></select></label>
+                  <label>Estado<select name="status" defaultValue="capturing"><option value="capturing">En captura</option><option value="available">Disponible</option><option value="paused">Pausar</option></select></label>
+                  <label>Precio<input name="price_amount" required type="number" min="0" /></label>
+                  <label>Moneda<select name="price_currency" defaultValue="USD"><option>USD</option><option>ARS</option></select></label>
+                  <label>Tipo<input name="property_type" placeholder="apartment" /></label>
+                  <label>Dirección<input name="address" /></label><label>Barrio<input name="neighborhood" /></label><label>Ciudad<input name="city" /></label>
+                  <label>Habitaciones<input name="rooms" type="number" min="0" /></label><label>Baños<input name="bathrooms" type="number" min="0" /></label><label>Cocheras<input name="parking_spaces" type="number" min="0" /></label>
+                  <label>Sup. cubierta m²<input name="covered_area_m2" type="number" min="0" /></label><label>Sup. total m²<input name="total_area_m2" type="number" min="0" /></label><label>Referencia<input name="reference_code" /></label>
+                  <button className="ghost-btn" type="submit" disabled={propertyBusy}>Crear propiedad</button>
+                </form>
                 {data.properties.items.map((property, index) => (
                   <div className="property" key={property.property_id}>
                     <div className={`property-image ${index % 2 === 0 ? "image-one" : "image-two"}`}></div>
@@ -1615,7 +1668,8 @@ export default function DashboardPage(): React.ReactElement {
                       <strong>{property.title}</strong>
                       <p>{property.bedrooms} dormitorios · <span className={pillFor(property.availability)}>{statusLabel(property.availability)}</span></p>
                     </div>
-                    <b>{formatMoney(property.price, property.currency)}</b>
+                    <div><b>{formatMoney(property.price, property.currency)}</b><button className="ghost-btn" type="button" disabled={propertyBusy} onClick={() => setEditingPropertyId(editingPropertyId === property.property_id ? null : property.property_id)}>Editar</button></div>
+                    {editingPropertyId === property.property_id ? <form className="property-edit-form" onSubmit={(e) => void submitUpdateProperty(e, property.property_id)}><label>Título<input name="title" defaultValue={property.title} /></label><label>Precio<input name="price_amount" defaultValue={property.price} /></label><label>Dirección<input name="address" defaultValue={property.location} /></label><button className="ghost-btn" disabled={propertyBusy}>Guardar</button></form> : null}
                   </div>
                 ))}
               </section>
