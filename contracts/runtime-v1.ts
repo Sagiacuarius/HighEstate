@@ -2228,3 +2228,348 @@ export function demoQueryCacheKey(
   if (/[\s/:]/.test(qualifier)) throw new Error("Invalid demo cache key qualifier");
   return `mvp-demo:v1:${agencyId}:${clientAccountId}:${surface}:${qualifier.trim()}`;
 }
+
+/**
+ * Commercial Pipelines WU19 — advisor pipeline/stage write surface
+ * (mirror api/routes/pipeline_wu19.py on build_pipeline_router:
+ * POST /pipelines, PUT /pipelines/{pipeline_id}, POST
+ * /pipelines/{pipeline_id}/stages, PUT /stages/{stage_id}, POST
+ * /stages/{stage_id}/move with the strict up|down enum, DELETE
+ * /stages/{stage_id}).
+ *
+ * Every success envelope is {contract_version, environment:
+ * dev-only-commercial-pipelines, accepted, replayed, correlation_id,
+ * result: payload}; scope is server-derived so no account id ever appears
+ * in a request body. A stage delete blocked by leads denies fail-closed
+ * with 409 {error: {code: stage_has_leads, ...}, lead_count}. The UI
+ * re-reads GET /v1/demo/pipeline after every mutation; these parsers only
+ * prove the write envelope round-trips with the same strictness.
+ */
+export const PIPELINE_WRITE_ENVIRONMENT = "dev-only-commercial-pipelines" as const;
+
+/** Strict move direction domain (mirror _require_direction: up|down only). */
+export const PIPELINE_MOVE_DIRECTIONS = ["up", "down"] as const;
+export type PipelineMoveDirection = (typeof PIPELINE_MOVE_DIRECTIONS)[number];
+
+type PipelineWriteBase = {
+  contract_version: typeof RUNTIME_CONTRACT_VERSION;
+  environment: typeof PIPELINE_WRITE_ENVIRONMENT;
+  accepted: true;
+  replayed: boolean;
+  correlation_id: CorrelationId;
+};
+
+export type PipelineCreatedStage = {
+  stage_id: string;
+  name: string;
+  position: number;
+};
+
+export type PipelineCreateResponse = PipelineWriteBase & {
+  result: {
+    resource_id: string;
+    name: string;
+    stages: PipelineCreatedStage[];
+    correlation_id: string;
+  };
+};
+
+export type PipelineRenameResponse = PipelineWriteBase & {
+  result: {
+    resource_id: string;
+    name: string;
+    /** Pipelines carry no agent-known stage names: always false, kept so the rename envelope stays uniform. */
+    agent_name_warning: boolean;
+    correlation_id: string;
+  };
+};
+
+export type PipelineStageCreateResponse = PipelineWriteBase & {
+  result: {
+    resource_id: string;
+    pipeline_id: string;
+    name: string;
+    position: number;
+    correlation_id: string;
+  };
+};
+
+export type PipelineStageRenameResponse = PipelineWriteBase & {
+  result: {
+    resource_id: string;
+    name: string;
+    previous_name: string;
+    /** Warn-only agent-name guard: true when either side touches a known agent stage name. */
+    agent_name_warning: boolean;
+    correlation_id: string;
+  };
+};
+
+export type PipelineStageMoveResponse = PipelineWriteBase & {
+  result: {
+    resource_id: string;
+    position: number;
+    /** False on the already-first/already-last edge no-op (still success). */
+    moved: boolean;
+    correlation_id: string;
+  };
+};
+
+export type PipelineStageDeleteResponse = PipelineWriteBase & {
+  result: {
+    resource_id: string;
+    deleted: true;
+    /** True when the deleted stage carried an agent-known name. */
+    agent_name_warning: boolean;
+    correlation_id: string;
+  };
+};
+
+/** Fail-closed 409 when leads still reference the stage. */
+export type PipelineStageDeleteDenial = {
+  error: {
+    code: "stage_has_leads";
+    message: string;
+    correlation_id: CorrelationId;
+  };
+  lead_count: number | null;
+};
+
+/** Write inputs — scope is server-derived; no account id appears here. */
+export type CreatePipelineInput = {
+  name: string;
+  stages?: string[];
+  idempotencyKey?: string;
+};
+
+export type RenamePipelineInput = {
+  name: string;
+  idempotencyKey?: string;
+};
+
+export type CreateStageInput = {
+  name: string;
+  idempotencyKey?: string;
+};
+
+export type RenameStageInput = {
+  name: string;
+  idempotencyKey?: string;
+};
+
+export type MoveStageInput = {
+  direction: PipelineMoveDirection;
+  idempotencyKey?: string;
+};
+
+export type DeleteStageInput = {
+  idempotencyKey?: string;
+};
+
+function parsePipelineWriteEnvelope(value: unknown, label: string): {
+  correlation: CorrelationId;
+  replayed: boolean;
+  payload: Record<string, unknown>;
+} {
+  if (!isRecord(value)) throw new Error(`Invalid ${label} response`);
+  for (const key of Object.keys(value)) {
+    if (
+      key !== "contract_version" && key !== "environment" && key !== "accepted" &&
+      key !== "replayed" && key !== "correlation_id" && key !== "result"
+    ) {
+      throw new Error(`Invalid ${label} key: unknown key "${key}"`);
+    }
+  }
+  if (value.contract_version !== RUNTIME_CONTRACT_VERSION) throw new Error("Unsupported contract version");
+  if (value.environment !== PIPELINE_WRITE_ENVIRONMENT) throw new Error(`Invalid ${label} environment`);
+  if (value.accepted !== true) throw new Error(`Invalid ${label} accepted flag`);
+  if (typeof value.replayed !== "boolean") throw new Error(`Invalid ${label} replayed flag`);
+  const correlation = reqStr(value, "correlation_id", `${label}.correlation_id`);
+  correlationId(correlation);
+  return {
+    correlation: correlation as CorrelationId,
+    replayed: value.replayed,
+    payload: reqRecord(value.result, `${label}.result`),
+  };
+}
+
+function pipelineWriteBase(correlation: CorrelationId, replayed: boolean): PipelineWriteBase {
+  return {
+    contract_version: RUNTIME_CONTRACT_VERSION,
+    environment: PIPELINE_WRITE_ENVIRONMENT,
+    accepted: true,
+    replayed,
+    correlation_id: correlation,
+  };
+}
+
+function parsePipelineCreatedStage(value: unknown, label: string): PipelineCreatedStage {
+  const record = reqRecord(value, label);
+  for (const key of Object.keys(record)) {
+    if (key !== "stage_id" && key !== "name" && key !== "position") {
+      throw new Error(`Invalid ${label} key: unknown key "${key}"`);
+    }
+  }
+  return {
+    stage_id: reqStr(record, "stage_id", `${label}.stage_id`),
+    name: reqStr(record, "name", `${label}.name`),
+    position: reqNum(record, "position", `${label}.position`),
+  };
+}
+
+export function parsePipelineCreateResponse(value: unknown): PipelineCreateResponse {
+  const { correlation, replayed, payload } = parsePipelineWriteEnvelope(value, "pipeline create");
+  for (const key of Object.keys(payload)) {
+    if (key !== "resource_id" && key !== "name" && key !== "stages" && key !== "correlation_id") {
+      throw new Error(`Invalid pipeline create key: unknown key "${key}"`);
+    }
+  }
+  const stages = reqArray(payload.stages, "pipeline create.stages")
+    .map((entry, index) => parsePipelineCreatedStage(entry, `pipeline create.stages[${index}]`));
+  return {
+    ...pipelineWriteBase(correlation, replayed),
+    result: {
+      resource_id: reqStr(payload, "resource_id", "pipeline create.resource_id"),
+      name: reqStr(payload, "name", "pipeline create.name"),
+      stages,
+      correlation_id: reqStr(payload, "correlation_id", "pipeline create.correlation_id"),
+    },
+  };
+}
+
+export function parsePipelineRenameResponse(value: unknown): PipelineRenameResponse {
+  const { correlation, replayed, payload } = parsePipelineWriteEnvelope(value, "pipeline rename");
+  for (const key of Object.keys(payload)) {
+    if (key !== "resource_id" && key !== "name" && key !== "agent_name_warning" && key !== "correlation_id") {
+      throw new Error(`Invalid pipeline rename key: unknown key "${key}"`);
+    }
+  }
+  return {
+    ...pipelineWriteBase(correlation, replayed),
+    result: {
+      resource_id: reqStr(payload, "resource_id", "pipeline rename.resource_id"),
+      name: reqStr(payload, "name", "pipeline rename.name"),
+      agent_name_warning: reqBool(payload, "agent_name_warning", "pipeline rename.agent_name_warning"),
+      correlation_id: reqStr(payload, "correlation_id", "pipeline rename.correlation_id"),
+    },
+  };
+}
+
+export function parsePipelineStageCreateResponse(value: unknown): PipelineStageCreateResponse {
+  const { correlation, replayed, payload } = parsePipelineWriteEnvelope(value, "pipeline stage create");
+  for (const key of Object.keys(payload)) {
+    if (
+      key !== "resource_id" && key !== "pipeline_id" && key !== "name" &&
+      key !== "position" && key !== "correlation_id"
+    ) {
+      throw new Error(`Invalid pipeline stage create key: unknown key "${key}"`);
+    }
+  }
+  return {
+    ...pipelineWriteBase(correlation, replayed),
+    result: {
+      resource_id: reqStr(payload, "resource_id", "pipeline stage create.resource_id"),
+      pipeline_id: reqStr(payload, "pipeline_id", "pipeline stage create.pipeline_id"),
+      name: reqStr(payload, "name", "pipeline stage create.name"),
+      position: reqNum(payload, "position", "pipeline stage create.position"),
+      correlation_id: reqStr(payload, "correlation_id", "pipeline stage create.correlation_id"),
+    },
+  };
+}
+
+export function parsePipelineStageRenameResponse(value: unknown): PipelineStageRenameResponse {
+  const { correlation, replayed, payload } = parsePipelineWriteEnvelope(value, "pipeline stage rename");
+  for (const key of Object.keys(payload)) {
+    if (
+      key !== "resource_id" && key !== "name" && key !== "previous_name" &&
+      key !== "agent_name_warning" && key !== "correlation_id"
+    ) {
+      throw new Error(`Invalid pipeline stage rename key: unknown key "${key}"`);
+    }
+  }
+  return {
+    ...pipelineWriteBase(correlation, replayed),
+    result: {
+      resource_id: reqStr(payload, "resource_id", "pipeline stage rename.resource_id"),
+      name: reqStr(payload, "name", "pipeline stage rename.name"),
+      previous_name: reqStr(payload, "previous_name", "pipeline stage rename.previous_name"),
+      agent_name_warning: reqBool(payload, "agent_name_warning", "pipeline stage rename.agent_name_warning"),
+      correlation_id: reqStr(payload, "correlation_id", "pipeline stage rename.correlation_id"),
+    },
+  };
+}
+
+export function parsePipelineStageMoveResponse(value: unknown): PipelineStageMoveResponse {
+  const { correlation, replayed, payload } = parsePipelineWriteEnvelope(value, "pipeline stage move");
+  for (const key of Object.keys(payload)) {
+    if (key !== "resource_id" && key !== "position" && key !== "moved" && key !== "correlation_id") {
+      throw new Error(`Invalid pipeline stage move key: unknown key "${key}"`);
+    }
+  }
+  return {
+    ...pipelineWriteBase(correlation, replayed),
+    result: {
+      resource_id: reqStr(payload, "resource_id", "pipeline stage move.resource_id"),
+      position: reqNum(payload, "position", "pipeline stage move.position"),
+      moved: reqBool(payload, "moved", "pipeline stage move.moved"),
+      correlation_id: reqStr(payload, "correlation_id", "pipeline stage move.correlation_id"),
+    },
+  };
+}
+
+export function parsePipelineStageDeleteResponse(value: unknown): PipelineStageDeleteResponse {
+  const { correlation, replayed, payload } = parsePipelineWriteEnvelope(value, "pipeline stage delete");
+  for (const key of Object.keys(payload)) {
+    if (
+      key !== "resource_id" && key !== "deleted" &&
+      key !== "agent_name_warning" && key !== "correlation_id"
+    ) {
+      throw new Error(`Invalid pipeline stage delete key: unknown key "${key}"`);
+    }
+  }
+  if (payload.deleted !== true) throw new Error("Invalid pipeline stage delete.deleted");
+  return {
+    ...pipelineWriteBase(correlation, replayed),
+    result: {
+      resource_id: reqStr(payload, "resource_id", "pipeline stage delete.resource_id"),
+      deleted: true,
+      agent_name_warning: reqBool(payload, "agent_name_warning", "pipeline stage delete.agent_name_warning"),
+      correlation_id: reqStr(payload, "correlation_id", "pipeline stage delete.correlation_id"),
+    },
+  };
+}
+
+export function parsePipelineStageDeleteDenial(value: unknown): PipelineStageDeleteDenial {
+  const record = reqRecord(value, "pipeline stage delete denial");
+  for (const key of Object.keys(record)) {
+    if (key !== "error" && key !== "lead_count") {
+      throw new Error(`Invalid pipeline stage delete denial key: unknown key "${key}"`);
+    }
+  }
+  const error = reqRecord(record.error, "pipeline stage delete denial.error");
+  for (const key of Object.keys(error)) {
+    if (key !== "code" && key !== "message" && key !== "correlation_id") {
+      throw new Error(`Invalid pipeline stage delete denial error key: unknown key "${key}"`);
+    }
+  }
+  if (error.code !== "stage_has_leads") {
+    throw new Error('Invalid pipeline stage delete denial code: must be "stage_has_leads"');
+  }
+  const correlation = reqStr(error, "correlation_id", "pipeline stage delete denial.correlation_id");
+  correlationId(correlation);
+  const leadCount = record.lead_count;
+  if (
+    leadCount !== undefined && leadCount !== null &&
+    (typeof leadCount !== "number" || !Number.isFinite(leadCount))
+  ) {
+    throw new Error("Invalid pipeline stage delete denial.lead_count");
+  }
+  return {
+    error: {
+      code: "stage_has_leads",
+      message: reqStr(error, "message", "pipeline stage delete denial.message"),
+      correlation_id: correlation as CorrelationId,
+    },
+    lead_count: (leadCount ?? null) as number | null,
+  };
+}

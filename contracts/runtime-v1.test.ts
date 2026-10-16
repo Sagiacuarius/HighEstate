@@ -3,6 +3,7 @@ import {
   CORRELATION_ID_MAX_LENGTH,
   SIGNAL_KEYS,
   AGENT_CONSOLE_ACTION_TYPES,
+  PIPELINE_MOVE_DIRECTIONS,
   correlationId,
   correlationIdOrGenerate,
   idempotencyKey,
@@ -40,6 +41,13 @@ import {
   parseSignalBindingsResponse,
   parseSignalBindingWriteResponse,
   parseSignalBindingDeleteResponse,
+  parsePipelineCreateResponse,
+  parsePipelineRenameResponse,
+  parsePipelineStageCreateResponse,
+  parsePipelineStageRenameResponse,
+  parsePipelineStageMoveResponse,
+  parsePipelineStageDeleteResponse,
+  parsePipelineStageDeleteDenial,
   parseLivenessResponse,
   parseReadinessResponse,
 } from "./runtime-v1";
@@ -825,5 +833,162 @@ describe("signal binding contracts (WU18)", () => {
       signal_key: "phone", deleted: true, rogue: 1,
     }))).toThrow(/unknown key/);
     expect(() => parseSignalBindingsResponse(null)).toThrow();
+  });
+});
+
+/* --- Commercial Pipelines WU19: pipeline/stage write envelopes --- */
+
+function pipelineEnvelope(payload: Record<string, unknown>,
+  overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    contract_version: "v1",
+    environment: "dev-only-commercial-pipelines",
+    accepted: true,
+    replayed: false,
+    correlation_id: "corr-w19",
+    result: payload,
+    ...overrides,
+  };
+}
+
+describe("commercial pipeline write contracts", () => {
+  it("exposes the strict up|down move direction domain", () => {
+    expect([...PIPELINE_MOVE_DIRECTIONS]).toEqual(["up", "down"]);
+  });
+
+  it("parses valid pipeline and stage write fixtures", () => {
+    const created = parsePipelineCreateResponse(pipelineEnvelope({
+      resource_id: "p1", name: "Embudo Norte",
+      stages: [
+        { stage_id: "s1", name: "Nuevo", position: 0 },
+        { stage_id: "s2", name: "Calificado", position: 1 },
+      ],
+      correlation_id: "corr-w19",
+    }));
+    expect(created.result.name).toBe("Embudo Norte");
+    expect(created.result.stages).toHaveLength(2);
+    expect(created.result.stages[1]?.position).toBe(1);
+
+    const renamed = parsePipelineRenameResponse(pipelineEnvelope({
+      resource_id: "p1", name: "Embudo Sur",
+      agent_name_warning: false, correlation_id: "corr-w19",
+    }));
+    expect(renamed.result.agent_name_warning).toBe(false);
+
+    const stageCreated = parsePipelineStageCreateResponse(pipelineEnvelope({
+      resource_id: "s3", pipeline_id: "p1", name: "Visita",
+      position: 2, correlation_id: "corr-w19",
+    }));
+    expect(stageCreated.result.position).toBe(2);
+
+    const stageRenamed = parsePipelineStageRenameResponse(pipelineEnvelope({
+      resource_id: "s2", name: "Otro", previous_name: "Calificado",
+      agent_name_warning: true, correlation_id: "corr-w19",
+    }));
+    expect(stageRenamed.result.agent_name_warning).toBe(true);
+    expect(stageRenamed.result.previous_name).toBe("Calificado");
+
+    const moved = parsePipelineStageMoveResponse(pipelineEnvelope({
+      resource_id: "s2", position: 0, moved: true, correlation_id: "corr-w19",
+    }));
+    expect(moved.result.moved).toBe(true);
+
+    const edge = parsePipelineStageMoveResponse(pipelineEnvelope({
+      resource_id: "s1", position: 0, moved: false, correlation_id: "corr-w19",
+    }));
+    expect(edge.result.moved).toBe(false);
+
+    const deleted = parsePipelineStageDeleteResponse(pipelineEnvelope({
+      resource_id: "s3", deleted: true,
+      agent_name_warning: false, correlation_id: "corr-w19",
+    }));
+    expect(deleted.result.deleted).toBe(true);
+  });
+
+  it("parses the fail-closed stage delete denial with its lead count", () => {
+    const blocked = parsePipelineStageDeleteDenial({
+      error: {
+        code: "stage_has_leads",
+        message: "stage cannot be deleted while leads reference it",
+        correlation_id: "corr-w19",
+      },
+      lead_count: 3,
+    });
+    expect(blocked.error.code).toBe("stage_has_leads");
+    expect(blocked.lead_count).toBe(3);
+
+    const racy = parsePipelineStageDeleteDenial({
+      error: {
+        code: "stage_has_leads",
+        message: "stage cannot be deleted while leads reference it",
+        correlation_id: "corr-w19",
+      },
+    });
+    expect(racy.lead_count).toBeNull();
+  });
+
+  it("rejects unknown keys and invalid write payloads", () => {
+    expect(() => parsePipelineCreateResponse(pipelineEnvelope({
+      resource_id: "p1", name: "X", stages: [], correlation_id: "c",
+    }, { rogue: 1 }))).toThrow(/unknown key/);
+    expect(() => parsePipelineCreateResponse(pipelineEnvelope({
+      resource_id: "p1", name: "X", stages: [], correlation_id: "c", rogue: 1,
+    }))).toThrow(/unknown key/);
+    expect(() => parsePipelineCreateResponse(pipelineEnvelope({
+      resource_id: "p1", name: "X",
+      stages: [{ stage_id: "s1", name: "Nuevo", position: 0, rogue: 1 }],
+      correlation_id: "c",
+    }))).toThrow(/unknown key/);
+    expect(() => parsePipelineCreateResponse(pipelineEnvelope({
+      resource_id: "p1", name: "X",
+      stages: [{ stage_id: "s1", name: "Nuevo", position: "cero" }],
+      correlation_id: "c",
+    }))).toThrow(/position/);
+    expect(() => parsePipelineRenameResponse(pipelineEnvelope({
+      resource_id: "p1", name: "X",
+      agent_name_warning: "no", correlation_id: "c",
+    }))).toThrow(/agent_name_warning/);
+    expect(() => parsePipelineStageCreateResponse(pipelineEnvelope({
+      resource_id: "s1", pipeline_id: "p1", name: "X",
+      position: 0, correlation_id: "c",
+    }, { environment: "dev-only-agent" }))).toThrow(/environment/);
+    expect(() => parsePipelineStageRenameResponse(pipelineEnvelope({
+      resource_id: "s1", name: "X",
+      agent_name_warning: true, correlation_id: "c",
+    }))).toThrow(/previous_name/);
+    expect(() => parsePipelineStageMoveResponse(pipelineEnvelope({
+      resource_id: "s1", position: 0, moved: "mucho", correlation_id: "c",
+    }))).toThrow(/moved/);
+    expect(() => parsePipelineStageMoveResponse(pipelineEnvelope({
+      resource_id: "s1", position: 0, correlation_id: "c",
+    }))).toThrow(/moved/);
+    expect(() => parsePipelineStageDeleteResponse(pipelineEnvelope({
+      resource_id: "s1", deleted: false,
+      agent_name_warning: false, correlation_id: "c",
+    }))).toThrow(/deleted/);
+    expect(() => parsePipelineStageDeleteDenial({
+      error: {
+        code: "tenant_access_denied", message: "access denied",
+        correlation_id: "corr-w19",
+      },
+      lead_count: 1,
+    })).toThrow(/stage_has_leads/);
+    expect(() => parsePipelineStageDeleteDenial({
+      error: {
+        code: "stage_has_leads",
+        message: "stage cannot be deleted while leads reference it",
+        correlation_id: "corr-w19",
+      },
+      lead_count: "tres",
+    })).toThrow(/lead_count/);
+    expect(() => parsePipelineStageDeleteDenial({
+      error: {
+        code: "stage_has_leads",
+        message: "stage cannot be deleted while leads reference it",
+        correlation_id: "corr-w19",
+      },
+      lead_count: 1, rogue: 1,
+    })).toThrow(/unknown key/);
+    expect(() => parsePipelineCreateResponse(null)).toThrow();
   });
 });

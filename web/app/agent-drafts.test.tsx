@@ -716,3 +716,224 @@ describe("WU18 Fuentes del agente: signal bindings console section", () => {
     expect(screen.getByText(/400 · invalid_command/)).toBeTruthy();
   });
 });
+
+/* --- WU19 Embudo stubs (mirror the commercial-pipeline write envelopes) --- */
+
+function pipeWrite(result: unknown): unknown {
+  return {
+    contract_version: "v1", environment: "dev-only-commercial-pipelines",
+    accepted: true, replayed: false, correlation_id: "c1", result,
+  };
+}
+
+let embudoPage: () => unknown = () => ({ ...META, count: 0, items: [] });
+let embudoMoved = true;
+let embudoRenameWarning = true;
+let embudoWriteFail: { status: number; code: string; correlation: string } | null = null;
+let embudoDeleteFail: { status: number; code: string; correlation: string } | null = null;
+
+function defaultEmbudoPage(): unknown {
+  return {
+    ...META, count: 1,
+    items: [{
+      pipeline_id: "p1", name: "Embudo demo",
+      stages: [
+        { stage_id: "s1", name: "Nuevo", position: 0, lead_count: 0 },
+        { stage_id: "s2", name: "Calificado", position: 1, lead_count: 0 },
+      ],
+    }],
+  };
+}
+
+function stubEmbudoTransport(): void {
+  const baseFetch = globalThis.fetch as unknown as (input: string, init?: RequestInit) => Promise<Response>;
+  vi.stubGlobal("fetch", vi.fn(async (input: string, init?: RequestInit) => {
+    const url = String(input);
+    const parsed = new URL(url);
+    const method = init?.method ?? "GET";
+    const readBody = (): unknown =>
+      (typeof init?.body === "string" ? JSON.parse(init.body) : undefined);
+    if (parsed.pathname === "/v1/demo/pipeline" && method === "GET") {
+      calls.push({ method, url, body: undefined });
+      return jsonOk(embudoPage());
+    }
+    if (parsed.pathname === "/v1/demo/pipelines" && method === "POST") {
+      const posted = (readBody() ?? {}) as { name?: string; stages?: string[] };
+      calls.push({ method, url, body: readBody() });
+      if (embudoWriteFail) return errResponse(embudoWriteFail);
+      return jsonOk(pipeWrite({
+        resource_id: "p9",
+        name: posted.name ?? "Embudo norte",
+        stages: Array.isArray(posted.stages)
+          ? posted.stages.map((name, index) => ({ stage_id: `s9-${index}`, name, position: index }))
+          : [],
+        correlation_id: "c1",
+      }));
+    }
+    if (/^\/v1\/demo\/stages\/[^/]+$/.test(parsed.pathname) && method === "PUT") {
+      const stageId = decodeURIComponent(parsed.pathname.split("/").pop() as string);
+      const posted = (readBody() ?? {}) as { name?: string };
+      calls.push({ method, url, body: readBody() });
+      if (embudoWriteFail) return errResponse(embudoWriteFail);
+      return jsonOk(pipeWrite({
+        resource_id: stageId, name: posted.name ?? "Renombrada",
+        previous_name: "Nuevo", agent_name_warning: embudoRenameWarning, correlation_id: "c1",
+      }));
+    }
+    const move = parsed.pathname.match(/^\/v1\/demo\/stages\/([^/]+)\/move$/);
+    if (move && method === "POST") {
+      calls.push({ method, url, body: readBody() });
+      if (embudoWriteFail) return errResponse(embudoWriteFail);
+      return jsonOk(pipeWrite({
+        resource_id: decodeURIComponent(move[1]),
+        position: 0, moved: embudoMoved, correlation_id: "c1",
+      }));
+    }
+    const del = parsed.pathname.match(/^\/v1\/demo\/stages\/([^/]+)$/);
+    if (del && method === "DELETE") {
+      calls.push({ method, url, body: readBody() });
+      if (embudoDeleteFail) {
+        return new Response(JSON.stringify({
+          error: { code: embudoDeleteFail.code, message: `stub ${embudoDeleteFail.code}`, correlation_id: embudoDeleteFail.correlation },
+          lead_count: 3,
+        }), { status: embudoDeleteFail.status, headers: { "content-type": "application/json", "x-correlation-id": embudoDeleteFail.correlation } });
+      }
+      return jsonOk(pipeWrite({
+        resource_id: decodeURIComponent(del[1]),
+        deleted: true, agent_name_warning: false, correlation_id: "c1",
+      }));
+    }
+    return baseFetch(input, init);
+  }));
+}
+
+describe("WU19 Embudo: pipelines y etapas", () => {
+  beforeEach(() => {
+    stubFetch();
+    embudoPage = () => defaultEmbudoPage();
+    embudoMoved = true;
+    embudoRenameWarning = true;
+    embudoWriteFail = null;
+    embudoDeleteFail = null;
+    stubEmbudoTransport();
+  });
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
+
+  async function openEmbudo(): Promise<void> {
+    await waitFor(() => {
+      if (!document.querySelector('.main-nav a[href="#pipeline"]')) throw new Error("nav not ready");
+    });
+    fireEvent.click(document.querySelector('.main-nav a[href="#pipeline"]') as HTMLElement);
+    await screen.findByText("Embudo comercial");
+  }
+
+  function embudoButton(name: string): HTMLElement {
+    const panel = document.querySelector(".view-section.is-visible .pipeline-panel");
+    const found = Array.from(panel?.querySelectorAll("button") ?? [])
+      .find((b) => b.textContent?.trim() === name);
+    if (!found) throw new Error(`embudo button not found: ${name}`);
+    return found as HTMLElement;
+  }
+
+  it("create form posts the typed payload and refreshes", async () => {
+    const { default: DashboardPage } = await import("./page");
+    render(React.createElement(DashboardPage));
+    await openEmbudo();
+    const pipelineGetsBefore = calls.filter((c) => c.url.endsWith("/v1/demo/pipeline") && c.method === "GET").length;
+    fireEvent.change(screen.getByLabelText("Nombre del embudo"), { target: { value: "Embudo norte" } });
+    fireEvent.change(screen.getByLabelText("Etapas iniciales (separadas por comas)"), { target: { value: "Nuevo, Calificado, Visita" } });
+    fireEvent.click(screen.getByRole("button", { name: "Crear embudo" }));
+    await waitFor(() => {
+      const posts = calls.filter((c) => c.url.endsWith("/v1/demo/pipelines") && c.method === "POST");
+      expect(posts.length).toBe(1);
+      expect(posts[0].body).toEqual({ name: "Embudo norte", stages: ["Nuevo", "Calificado", "Visita"] });
+      expect(JSON.stringify(posts[0].body)).not.toMatch(/client_account_id/);
+    });
+    expect(await screen.findByText("Embudo creado")).toBeTruthy();
+    await waitFor(() => {
+      const pipelineGetsAfter = calls.filter((c) => c.url.endsWith("/v1/demo/pipeline") && c.method === "GET").length;
+      expect(pipelineGetsAfter).toBeGreaterThan(pipelineGetsBefore);
+    });
+  });
+
+  it("stage delete blocked shows the denial with lead count and never retries", async () => {
+    embudoPage = () => ({
+      ...META, count: 1,
+      items: [{
+        pipeline_id: "p1", name: "Embudo demo",
+        stages: [{ stage_id: "s1", name: "Nuevo", position: 0, lead_count: 3 }],
+      }],
+    });
+    embudoDeleteFail = { status: 409, code: "stage_has_leads", correlation: "corr-deny" };
+    const { default: DashboardPage } = await import("./page");
+    render(React.createElement(DashboardPage));
+    await openEmbudo();
+    fireEvent.click(embudoButton("Eliminar"));
+    expect(await screen.findByText("Confirmar eliminación")).toBeTruthy();
+    expect(await screen.findByText(/Repetí clic en eliminar para confirmar/)).toBeTruthy();
+    expect(calls.filter((c) => c.method === "DELETE" && c.url.includes("/v1/demo/stages/"))).toHaveLength(0);
+    fireEvent.click(embudoButton("Confirmar eliminación"));
+    await waitFor(() => {
+      expect(calls.filter((c) => c.method === "DELETE" && c.url.includes("/v1/demo/stages/s1"))).toHaveLength(1);
+    });
+    expect(await screen.findByText(/409 · stage_has_leads/)).toBeTruthy();
+    expect(screen.getByText(/corr-deny/)).toBeTruthy();
+    expect(screen.getByText(/3 prospecto\(s\)/)).toBeTruthy();
+    expect(calls.filter((c) => c.method === "DELETE" && c.url.includes("/v1/demo/stages/"))).toHaveLength(1);
+  });
+
+  it("rename surfacing agent_name_warning shows the warning badge", async () => {
+    embudoRenameWarning = true;
+    const { default: DashboardPage } = await import("./page");
+    render(React.createElement(DashboardPage));
+    await openEmbudo();
+    const form = document.querySelector('form[aria-label="Renombrar etapa Nuevo"]') as HTMLFormElement;
+    expect(form).toBeTruthy();
+    fireEvent.change(form.querySelector('input[name="name"]') as HTMLInputElement, { target: { value: "Contacto" } });
+    fireEvent.click(form.querySelector('button[type="submit"]') as HTMLElement);
+    await waitFor(() => {
+      const puts = calls.filter((c) => c.url.endsWith("/v1/demo/stages/s1") && c.method === "PUT");
+      expect(puts.length).toBe(1);
+      expect(puts[0].body).toEqual({ name: "Contacto" });
+      expect(JSON.stringify(puts[0].body)).not.toMatch(/client_account_id/);
+    });
+    expect(await screen.findByText(/el nombre coincide con una etapa usada por el agente/)).toBeTruthy();
+    expect(screen.getByText("nombre sensible del agente")).toBeTruthy();
+  });
+
+  it("move up/down posts direction and handles the already-at-edge message", async () => {
+    const { default: DashboardPage } = await import("./page");
+    render(React.createElement(DashboardPage));
+    await openEmbudo();
+    fireEvent.click(await screen.findByRole("button", { name: "Subir Nuevo" }));
+    await waitFor(() => {
+      const moves = calls.filter((c) => c.url.endsWith("/v1/demo/stages/s1/move") && c.method === "POST");
+      expect(moves.length).toBe(1);
+      expect(moves[0].body).toEqual({ direction: "up" });
+    });
+    expect(await screen.findByText("Etapa movida")).toBeTruthy();
+    embudoMoved = false;
+    fireEvent.click(screen.getByRole("button", { name: "Bajar Nuevo" }));
+    await waitFor(() => {
+      const moves = calls.filter((c) => c.url.endsWith("/v1/demo/stages/s1/move") && c.method === "POST");
+      expect(moves.length).toBe(2);
+      expect(moves[1].body).toEqual({ direction: "down" });
+    });
+    expect(await screen.findByText("La etapa ya está en ese extremo")).toBeTruthy();
+  });
+
+  it("failure surfaces the envelope with correlation", async () => {
+    embudoWriteFail = { status: 400, code: "invalid_command", correlation: "corr-pipe-err" };
+    const { default: DashboardPage } = await import("./page");
+    render(React.createElement(DashboardPage));
+    await openEmbudo();
+    fireEvent.change(screen.getByLabelText("Nombre del embudo"), { target: { value: "Embudo norte" } });
+    fireEvent.change(screen.getByLabelText("Etapas iniciales (separadas por comas)"), { target: { value: "Nuevo, Visita" } });
+    fireEvent.click(screen.getByRole("button", { name: "Crear embudo" }));
+    expect(await screen.findByText(/corr-pipe-err/)).toBeTruthy();
+    expect(screen.getByText(/400 · invalid_command/)).toBeTruthy();
+  });
+});

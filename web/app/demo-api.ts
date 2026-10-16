@@ -16,8 +16,8 @@ import {
   type RuntimeHttpClientOptions,
 } from "../runtime-client";
 import {
-  parseAgentDraftsResponse,
-  parseAgentDraftResponse,
+  PIPELINE_MOVE_DIRECTIONS,
+  parseAgentDraftsResponse,  parseAgentDraftResponse,
   parseAgentDraftCommandResponse,
   parseAgentPromptPreviewResponse,
   parseAgentPromptResponse,
@@ -49,6 +49,12 @@ import {
   parseKbSelfTestResponse,
   parseLeadFieldsResponse,
   parseLeadFieldsWriteResponse,
+  parsePipelineCreateResponse,
+  parsePipelineRenameResponse,
+  parsePipelineStageCreateResponse,
+  parsePipelineStageDeleteResponse,
+  parsePipelineStageMoveResponse,
+  parsePipelineStageRenameResponse,
   parseSignalBindingsResponse,
   parseSignalBindingWriteResponse,
   parseSignalBindingDeleteResponse,
@@ -96,6 +102,19 @@ import {
   type LeadFieldsInput,
   type LeadFieldsResponse,
   type LeadFieldsWriteResponse,
+  type CreatePipelineInput,
+  type CreateStageInput,
+  type DeleteStageInput,
+  type MoveStageInput,
+  type PipelineCreateResponse,
+  type PipelineMoveDirection,
+  type PipelineRenameResponse,
+  type PipelineStageCreateResponse,
+  type PipelineStageDeleteResponse,
+  type PipelineStageMoveResponse,
+  type PipelineStageRenameResponse,
+  type RenamePipelineInput,
+  type RenameStageInput,
   type CreateSignalBindingInput,
   type SignalBindingsResponse,
   type SignalBindingWriteResponse,
@@ -197,6 +216,13 @@ export type DemoApi = {
   listContactsByTag: (tag: string, options?: RuntimeHttpCallOptions) => Promise<ContactsByTagResponse>;
   addContactTag: (contactId: string, body: ContactTagInput, options?: RuntimeHttpCallOptions) => Promise<ContactTagsResponse>;
   removeContactTag: (contactId: string, body: ContactTagInput, options?: RuntimeHttpCallOptions) => Promise<ContactTagsResponse>;
+  /** WU19 commercial pipelines ("Embudo"): scope is server-derived, never a client account id. */
+  createPipeline: (body: CreatePipelineInput, options?: RuntimeHttpCallOptions) => Promise<PipelineCreateResponse>;
+  renamePipeline: (pipelineId: string, body: RenamePipelineInput, options?: RuntimeHttpCallOptions) => Promise<PipelineRenameResponse>;
+  createStage: (pipelineId: string, body: CreateStageInput, options?: RuntimeHttpCallOptions) => Promise<PipelineStageCreateResponse>;
+  renameStage: (stageId: string, body: RenameStageInput, options?: RuntimeHttpCallOptions) => Promise<PipelineStageRenameResponse>;
+  moveStage: (stageId: string, body: MoveStageInput, options?: RuntimeHttpCallOptions) => Promise<PipelineStageMoveResponse>;
+  deleteStage: (stageId: string, body: DeleteStageInput, options?: RuntimeHttpCallOptions) => Promise<PipelineStageDeleteResponse>;
 };
 
 /** WU15 dev-only mode switch input: paused is handoff-only, never settable here. */
@@ -344,6 +370,22 @@ export function createDemoApi(baseUrl: string, fetcher?: DemoApiFetcher): DemoAp
       runtime.post(`/v1/demo/agent/contacts/${encodeURIComponent(contactId)}/tags`, body, options ?? {}, parseContactTagsResponse),
     removeContactTag: (contactId, body, options) =>
       runtime.delete(`/v1/demo/agent/contacts/${encodeURIComponent(contactId)}/tags`, options ?? {}, parseContactTagsResponse, body),
+    createPipeline: (body, options) =>
+      runtime.post("/v1/demo/pipelines", body, options ?? {}, parsePipelineCreateResponse),
+    renamePipeline: (pipelineId, body, options) =>
+      runtime.put(`/v1/demo/pipelines/${encodeURIComponent(pipelineId)}`, body, options ?? {}, parsePipelineRenameResponse),
+    createStage: (pipelineId, body, options) =>
+      runtime.post(`/v1/demo/pipelines/${encodeURIComponent(pipelineId)}/stages`, body, options ?? {}, parsePipelineStageCreateResponse),
+    renameStage: (stageId, body, options) =>
+      runtime.put(`/v1/demo/stages/${encodeURIComponent(stageId)}`, body, options ?? {}, parsePipelineStageRenameResponse),
+    moveStage: (stageId, body, options) => {
+      if (!(PIPELINE_MOVE_DIRECTIONS as readonly string[]).includes(body.direction as string)) {
+        throw new Error('Invalid move direction: must be "up" or "down"');
+      }
+      return runtime.post(`/v1/demo/stages/${encodeURIComponent(stageId)}/move`, body, options ?? {}, parsePipelineStageMoveResponse);
+    },
+    deleteStage: (stageId, body, options) =>
+      runtime.delete(`/v1/demo/stages/${encodeURIComponent(stageId)}`, options ?? {}, parsePipelineStageDeleteResponse, { ...body }),
   };
 }
 

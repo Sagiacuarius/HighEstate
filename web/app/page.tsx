@@ -269,6 +269,14 @@ export default function DashboardPage(): React.ReactElement {
   const [tagFilter, setTagFilter] = React.useState<string>("");
   const [tagsNote, setTagsNote] = React.useState<string | null>(null);
   const [tagsError, setTagsError] = React.useState<string | null>(null);
+  // WU19 commercial pipelines: advisor management controls over the Embudo
+  // read (crear/renombrar embudos; agregar/renombrar/mover/eliminar etapas).
+  // Cada mutación refresca la lectura; los fallos muestran el envelope +
+  // correlación. confirmDeleteStageId arma el borrado en dos clics.
+  const [pipelineBusy, setPipelineBusy] = React.useState(false);
+  const [pipelineNote, setPipelineNote] = React.useState<string | null>(null);
+  const [confirmDeleteStageId, setConfirmDeleteStageId] = React.useState<string | null>(null);
+  const [warnedStageIds, setWarnedStageIds] = React.useState<string[]>([]);
 
   const loadConsole = React.useCallback(async (client: DemoApi): Promise<void> => {
     setConsoleLoading(true);
@@ -727,6 +735,150 @@ export default function DashboardPage(): React.ReactElement {
     },
     [],
   );
+
+  // WU19: mutaciones del Embudo (alcance derivado por el servidor; ningún
+  // payload lleva ids de cuenta). Cada éxito refresca la lectura del embudo;
+  // los fallos muestran el envelope + correlación.
+  const submitCreatePipeline = async (event: React.FormEvent<HTMLFormElement>): Promise<void> => {
+    event.preventDefault();
+    if (!api || pipelineBusy) return;
+    const formEl = event.currentTarget;
+    const form = new FormData(formEl);
+    const name = String(form.get("name") ?? "").trim();
+    if (!name) {
+      setPipelineNote("Escribí un nombre para el embudo nuevo.");
+      return;
+    }
+    const stages = String(form.get("stages") ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+    setPipelineBusy(true);
+    setPipelineNote(null);
+    try {
+      await api.createPipeline(stages.length > 0 ? { name, stages } : { name });
+      formEl.reset();
+      await reload(api);
+      setPipelineNote("Embudo creado");
+    } catch (error) {
+      setPipelineNote(`Crear embudo falló: ${consoleFailure(error)}`);
+    } finally {
+      setPipelineBusy(false);
+    }
+  };
+
+  const submitRenamePipeline = async (event: React.FormEvent<HTMLFormElement>, pipelineId: string): Promise<void> => {
+    event.preventDefault();
+    if (!api || pipelineBusy) return;
+    const name = String(new FormData(event.currentTarget).get("name") ?? "").trim();
+    if (!name) {
+      setPipelineNote("Escribí un nombre para renombrar el embudo.");
+      return;
+    }
+    setPipelineBusy(true);
+    setPipelineNote(null);
+    try {
+      await api.renamePipeline(pipelineId, { name });
+      await reload(api);
+      setPipelineNote("Embudo renombrado");
+    } catch (error) {
+      setPipelineNote(`Renombrar embudo falló: ${consoleFailure(error)}`);
+    } finally {
+      setPipelineBusy(false);
+    }
+  };
+
+  const submitCreateStage = async (event: React.FormEvent<HTMLFormElement>, pipelineId: string): Promise<void> => {
+    event.preventDefault();
+    if (!api || pipelineBusy) return;
+    const formEl = event.currentTarget;
+    const name = String(new FormData(formEl).get("name") ?? "").trim();
+    if (!name) {
+      setPipelineNote("Escribí un nombre para la etapa nueva.");
+      return;
+    }
+    setPipelineBusy(true);
+    setPipelineNote(null);
+    try {
+      await api.createStage(pipelineId, { name });
+      formEl.reset();
+      await reload(api);
+      setPipelineNote("Etapa agregada");
+    } catch (error) {
+      setPipelineNote(`Agregar etapa falló: ${consoleFailure(error)}`);
+    } finally {
+      setPipelineBusy(false);
+    }
+  };
+
+  const submitRenameStage = async (event: React.FormEvent<HTMLFormElement>, stageId: string): Promise<void> => {
+    event.preventDefault();
+    if (!api || pipelineBusy) return;
+    const name = String(new FormData(event.currentTarget).get("name") ?? "").trim();
+    if (!name) {
+      setPipelineNote("Escribí un nombre para renombrar la etapa.");
+      return;
+    }
+    setPipelineBusy(true);
+    setPipelineNote(null);
+    try {
+      const out = await api.renameStage(stageId, { name });
+      if (out.result.agent_name_warning && !warnedStageIds.includes(stageId)) {
+        setWarnedStageIds((prev) => [...prev, stageId]);
+      }
+      await reload(api);
+      setPipelineNote(out.result.agent_name_warning
+        ? "Etapa renombrada · el nombre coincide con una etapa usada por el agente"
+        : "Etapa renombrada");
+    } catch (error) {
+      setPipelineNote(`Renombrar etapa falló: ${consoleFailure(error)}`);
+    } finally {
+      setPipelineBusy(false);
+    }
+  };
+
+  const runMoveStage = async (stageId: string, direction: "up" | "down"): Promise<void> => {
+    if (!api || pipelineBusy) return;
+    setPipelineBusy(true);
+    setPipelineNote(null);
+    try {
+      const out = await api.moveStage(stageId, { direction });
+      await reload(api);
+      setPipelineNote(out.result.moved ? "Etapa movida" : "La etapa ya está en ese extremo");
+    } catch (error) {
+      setPipelineNote(`Mover etapa falló: ${consoleFailure(error)}`);
+    } finally {
+      setPipelineBusy(false);
+    }
+  };
+
+  const runDeleteStage = async (stageId: string): Promise<void> => {
+    if (!api || pipelineBusy) return;
+    if (confirmDeleteStageId !== stageId) {
+      setConfirmDeleteStageId(stageId);
+      setPipelineNote("Repetí clic en eliminar para confirmar el borrado.");
+      return;
+    }
+    setConfirmDeleteStageId(null);
+    setPipelineBusy(true);
+    setPipelineNote(null);
+    try {
+      const out = await api.deleteStage(stageId, {});
+      if (out.result.agent_name_warning && !warnedStageIds.includes(stageId)) {
+        setWarnedStageIds((prev) => [...prev, stageId]);
+      }
+      await reload(api);
+      setPipelineNote("Etapa eliminada");
+    } catch (error) {
+      if (error instanceof RuntimeHttpError && error.envelope.error.code === "stage_has_leads") {
+        const count = data.pipeline?.items
+          .flatMap((pipelineView) => pipelineView.stages)
+          .find((stage) => stage.stage_id === stageId)?.lead_count;
+        setPipelineNote(`Eliminar etapa falló: ${consoleFailure(error)} · ${count ?? "?"} prospecto(s) en la etapa`);
+      } else {
+        setPipelineNote(`Eliminar etapa falló: ${consoleFailure(error)}`);
+      }
+    } finally {
+      setPipelineBusy(false);
+    }
+  };
 
   React.useEffect(() => {
     if (!api) {
@@ -1475,22 +1627,50 @@ export default function DashboardPage(): React.ReactElement {
             {data.pipeline && data.leads ? (
               <section className="panel pipeline-panel">
                 <div className="panel-heading"><div><p className="eyebrow">Embudo comercial</p><h2>Embudo</h2></div></div>
+                {pipelineNote ? <p className="empty-note">{pipelineNote}</p> : null}
+                <form className="audit-filters" onSubmit={(e) => void submitCreatePipeline(e)} aria-label="Crear embudo">
+                  <label>Nombre del embudo<input name="name" placeholder="Nuevo embudo" /></label>
+                  <label>Etapas iniciales (separadas por comas)<input name="stages" placeholder="Nuevo, Calificado, Visita" /></label>
+                  <button className="ghost-btn" type="submit" disabled={pipelineBusy}>Crear embudo</button>
+                </form>
                 {data.pipeline.items.map((pipelineView) => (
                   <div key={pipelineView.pipeline_id}>
                     <p className="eyebrow">{pipelineView.name}</p>
+                    <form className="audit-filters" onSubmit={(e) => void submitRenamePipeline(e, pipelineView.pipeline_id)} aria-label={`Renombrar ${pipelineView.name}`}>
+                      <label>Renombrar embudo<input name="name" defaultValue={pipelineView.name} /></label>
+                      <button className="ghost-btn" type="submit" disabled={pipelineBusy}>Renombrar</button>
+                    </form>
                     <div className="pipeline">
                       {pipelineView.stages.map((stage) => (
                         <div className="pipeline-col" key={stage.stage_id}>
                           <div className="pipeline-col-head"><span>{stage.name}</span><b>{stage.lead_count}</b></div>
+                          {warnedStageIds.includes(stage.stage_id) ? (
+                            <span className="status-pill hot">nombre sensible del agente</span>
+                          ) : null}
                           {data.leads?.items.filter((lead) => lead.stage_id === stage.stage_id).map((lead) => (
                             <div className="lead-card" key={lead.lead_id}>
                               <strong>{lead.contact_name}</strong>
                               <small>{statusLabel(lead.status)} · {statusLabel(lead.source)}</small>
                             </div>
                           ))}
+                          <form className="audit-filters" onSubmit={(e) => void submitRenameStage(e, stage.stage_id)} aria-label={`Renombrar etapa ${stage.name}`}>
+                            <label>Renombrar etapa<input name="name" defaultValue={stage.name} /></label>
+                            <button className="ghost-btn" type="submit" disabled={pipelineBusy}>Renombrar</button>
+                          </form>
+                          <div className="audit-filters">
+                            <button className="ghost-btn" type="button" disabled={pipelineBusy} onClick={() => void runMoveStage(stage.stage_id, "up")} aria-label={`Subir ${stage.name}`}>Subir</button>
+                            <button className="ghost-btn" type="button" disabled={pipelineBusy} onClick={() => void runMoveStage(stage.stage_id, "down")} aria-label={`Bajar ${stage.name}`}>Bajar</button>
+                            <button className="ghost-btn danger" type="button" disabled={pipelineBusy} onClick={() => void runDeleteStage(stage.stage_id)}>
+                              {confirmDeleteStageId === stage.stage_id ? "Confirmar eliminación" : "Eliminar"}
+                            </button>
+                          </div>
                         </div>
                       ))}
                     </div>
+                    <form className="audit-filters" onSubmit={(e) => void submitCreateStage(e, pipelineView.pipeline_id)} aria-label={`Agregar etapa a ${pipelineView.name}`}>
+                      <label>Nueva etapa<input name="name" placeholder="Nombre de la etapa" /></label>
+                      <button className="ghost-btn" type="submit" disabled={pipelineBusy}>Agregar etapa</button>
+                    </form>
                   </div>
                 ))}
               </section>
