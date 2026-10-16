@@ -35,6 +35,7 @@ from api.adapters.postgres_agent_console import (
     load_calendar_config,
     load_console_settings,
     load_field_allowlist,
+    load_signal_bindings,
     preview_prompt,
     score_question,
 )
@@ -339,6 +340,7 @@ async def _dispatch_actions(*, context: Any, draft: AgentDraft,
                             create_event_cmd: Any, update_event_cmd: Any,
                             reply_cmd: Any, mode_cmd: Any,
                             transition_cmd: Any,
+                            custom_field_set_cmd: Any = None,
                             allowed_lead_fields: frozenset | None = None
                             ) -> list[dict[str, Any]]:
     """Shared per-action saga dispatch (approve, auto path, handoff
@@ -352,6 +354,14 @@ async def _dispatch_actions(*, context: Any, draft: AgentDraft,
     reason=lead_field_not_allowed` truthfully and the saga still finalizes
     (overlap-denial precedent). None (the default) means the legacy
     pre-console effect {stage_id, status}.
+
+    WU18 custom-field gate: the `set_custom_field_value` branch re-checks
+    `params["field_name"] in allowed` at dispatch time (defense-in-depth,
+    the allowlist may have changed since analyze); disallowed (or missing
+    field_name) records `outcome=denied, reason=lead_field_not_allowed`
+    and the saga still finalizes. Allowed delegates to the accepted WU17
+    `SetLeadCustomFieldValueCommand.execute_set` (single coercion
+    authority); command denials/validation surface truthfully per action.
     """
     allowed = (set(allowed_lead_fields) if allowed_lead_fields is not None
                else set(LEGACY_FIELD_ALLOWLIST))
@@ -365,6 +375,14 @@ async def _dispatch_actions(*, context: Any, draft: AgentDraft,
             entry.update(outcome="denied", reason="lead_field_not_allowed")
             results.append(entry)
             continue
+        if action.type == "set_custom_field_value":
+            field_name = (params.get("field_name")
+                          if isinstance(params, dict) else None)
+            if field_name not in allowed:
+                entry.update(outcome="denied",
+                             reason="lead_field_not_allowed")
+                results.append(entry)
+                continue
         try:
             if action.type == "create_follow_up":
                 due_at = datetime.fromisoformat(str(params["due_at"]).replace("Z", "+00:00"))
@@ -409,6 +427,15 @@ async def _dispatch_actions(*, context: Any, draft: AgentDraft,
                     to_stage_id=str(params["to_stage_id"]),
                     new_status=str(params.get("new_status", "qualified")),
                     idempotency_key=key)
+            elif action.type == "set_custom_field_value":
+                if custom_field_set_cmd is None:
+                    entry.update(outcome="unsupported")
+                    results.append(entry)
+                    continue
+                outcome = await custom_field_set_cmd.execute_set(
+                    context, lead_id=draft.lead_id,
+                    field_id=str(params["field_id"]),
+                    value=params["value"], idempotency_key=key)
             else:
                 entry.update(outcome="unsupported")
                 results.append(entry)
@@ -472,6 +499,34 @@ def build_agent_router(conn_kwargs: dict[str, Any], model_provider: Any | None =
         )
         return str(rows[0]["id"]) if rows else None
 
+    async def _signal_bindings(ctx: Any) -> dict[str, dict[str, str]]:
+        """WU18 enriched signal bindings {signal: {field_id, field_name}}.
+
+        Joins the account's `load_signal_bindings` ({signal: field_id})
+        with the defined custom-field names (the planner needs field_name
+        for the allowlist gate and dispatch re-check). Tolerant {} on any
+        read failure (pre-011 base), so emission stays off and bare
+        behavior is exact."""
+        try:
+            bound = await load_signal_bindings(ctx, runner)
+        except Exception:
+            return {}
+        if not bound:
+            return {}
+        try:
+            definitions = await load_custom_field_definitions(ctx, runner)
+        except Exception:
+            return {}
+        names = {str(d["id"]): d["name"] for d in definitions
+                 if d.get("id") and d.get("name")}
+        enriched: dict[str, dict[str, str]] = {}
+        for signal_key, field_id in bound.items():
+            name = names.get(str(field_id))
+            if name:
+                enriched[signal_key] = {"field_id": str(field_id),
+                                       "field_name": name}
+        return enriched
+
     async def _availability(ctx: Any, **kw: Any):
         """Free slots under the account's console calendar config (WU16);
         missing rows/tables fall back to the module constants, so bare
@@ -491,6 +546,7 @@ def build_agent_router(conn_kwargs: dict[str, Any], model_provider: Any | None =
         price_read=_price_read,
         last_interest=_last_interest,
         stage_id_for_name=_stage_id_for_name,
+        bindings=_signal_bindings,
     )
     analyze_cmd = AnalyzeInboundMessageCommand(dict(conn_kwargs))
     decide_cmd = DecideAgentDraftCommand(dict(conn_kwargs))
@@ -583,7 +639,8 @@ def build_agent_router(conn_kwargs: dict[str, Any], model_provider: Any | None =
                                        lead_id=lead_id, now=now,
                                        auto_types=settings.auto_types,
                                        calendar_allowed=settings.calendar_allowed,
-                                       system_prompt=prompt_text)
+                                       system_prompt=prompt_text,
+                                       allowed_lead_fields=allowed_fields)
         except InterpretationError:
             return envelope(502, "invalid_model_output",
                             "model response did not match the bounded schema", correlation)
@@ -595,7 +652,7 @@ def build_agent_router(conn_kwargs: dict[str, Any], model_provider: Any | None =
         try:
             outcome = await analyze_cmd.execute_analyze(
                 context, body=body, conversation_id=conversation_id,
-                contact_id=contact_id, plan=plan,
+                contact_id=contact_id, plan=plan, lead_id=lead_id,
                 idempotency_key=_key(raw.get("idempotencyKey"), fallback_key))
         except CrmCommandDenied as problem:
             return _denial(problem, correlation)
@@ -655,6 +712,7 @@ def build_agent_router(conn_kwargs: dict[str, Any], model_provider: Any | None =
                     interest_cmd=interest_cmd, create_event_cmd=create_event_cmd,
                     update_event_cmd=update_event_cmd, reply_cmd=reply_cmd,
                     mode_cmd=mode_cmd, transition_cmd=transition_cmd,
+                    custom_field_set_cmd=custom_field_set_cmd,
                     allowed_lead_fields=allowed_fields)
                 try:
                     await finalize_cmd.execute_finalize(
@@ -797,6 +855,7 @@ def build_agent_router(conn_kwargs: dict[str, Any], model_provider: Any | None =
             interest_cmd=interest_cmd, create_event_cmd=create_event_cmd,
             update_event_cmd=update_event_cmd, reply_cmd=reply_cmd,
             mode_cmd=mode_cmd, transition_cmd=transition_cmd,
+            custom_field_set_cmd=custom_field_set_cmd,
             allowed_lead_fields=allowed_fields)
 
         try:

@@ -24,6 +24,7 @@ from typing import Any, Callable
 
 from api.application.agent_persona import build_system_prompt
 from api.application.agent_policy import PolicySignals, evaluate as evaluate_policy
+from api.application.agent_signals import extract_signals
 from api.application.model_provider import validate_interpretation
 from api.domain.agent_draft import ProposedAction
 
@@ -114,7 +115,8 @@ class ConversationAgent:
                  kb_lookup: Callable[..., Any] | None = None,
                  price_read: Callable[..., Any] | None = None,
                  last_interest: Callable[..., Any] | None = None,
-                 stage_id_for_name: Callable[..., Any] | None = None):
+                 stage_id_for_name: Callable[..., Any] | None = None,
+                 bindings: Callable[..., Any] | None = None):
         self._model = model
         self._search = search      # (context, criteria) -> list[property_id]
         self._availability = availability  # (context, from, to, exclude?) -> [(start,end)]
@@ -123,12 +125,18 @@ class ConversationAgent:
         self._price_read = price_read  # (context, property_id) -> fields dict | None
         self._last_interest = last_interest  # (context, contact_id) -> property_id | None
         self._stage_id_for_name = stage_id_for_name  # (context, lead_id, name) -> stage_id | None
+        # (change: agent-custom-field-writes) account signal bindings:
+        # (context) -> {signal_key: {"field_id", "field_name"}}. None (the
+        # default) means zero bindings, so extraction is skipped entirely
+        # and no `set_custom_field_value` is ever emitted.
+        self._bindings = bindings
 
     async def analyze(self, context, body: str, *, contact_id: str,
                       lead_id: str | None, now: datetime,
                       auto_types: frozenset | None = None,
                       calendar_allowed: bool | None = None,
-                      system_prompt: str | None = None) -> dict[str, Any]:
+                      system_prompt: str | None = None,
+                      allowed_lead_fields: frozenset | None = None) -> dict[str, Any]:
         """Produce the bounded draft plan for one inbound message body.
 
         Raises InterpretationError/ProviderError — the caller persists nothing.
@@ -141,6 +149,13 @@ class ConversationAgent:
         bare calls behave exactly as before; no new intents); `system_prompt`
         replaces the composed system text (None/blank falls back to
         `build_system_prompt()` defaults).
+
+        Additive signal auto-fill (change: agent-custom-field-writes):
+        `allowed_lead_fields` is the injected allowlist (frozenset of lead
+        column names ∪ defined custom-field names; None/empty fails closed).
+        Bindings load once via the injected `bindings` callable; when empty
+        (or uninjected) extraction is skipped entirely and no
+        `set_custom_field_value` is emitted.
         """
         prompt_text = (system_prompt if isinstance(system_prompt, str)
                        and system_prompt.strip() else build_system_prompt())
@@ -206,12 +221,28 @@ class ConversationAgent:
         if handoff:
             handoff_reason = "complaint" if complaint else "explicit_request"
 
+        # Signal auto-fill (change: agent-custom-field-writes): one bindings
+        # load; zero bindings (or no injected callable) skips extraction
+        # entirely (owner decision 2a) — no action, no cost, no guessing.
+        bound: dict[str, Any] = {}
+        if self._bindings is not None:
+            try:
+                loaded = await self._bindings(context)
+            except Exception:
+                loaded = {}
+            if isinstance(loaded, dict):
+                bound = loaded
+        signal_values: dict[str, Any] = {}
+        if bound:
+            signal_values = extract_signals(interp, body)
+
         actions = self._derive_actions(
             intent=intent, criteria=criteria, matched=matched, slot=slot,
             reschedule_event_id=event_id, contact_id=contact_id, lead_id=lead_id,
             now=now, kb_article=kb_article, price=price,
             qual_stage_id=qual_stage_id, visit_stage_id=visit_stage_id,
-            handoff_reason=handoff_reason)
+            handoff_reason=handoff_reason, signal_values=signal_values,
+            bindings=bound, allowed_lead_fields=allowed_lead_fields)
 
         transition_stage_id = qual_stage_id or visit_stage_id
         signals = PolicySignals(
@@ -311,7 +342,11 @@ class ConversationAgent:
                         price: dict[str, Any] | None = None,
                         qual_stage_id: str | None = None,
                         visit_stage_id: str | None = None,
-                        handoff_reason: str | None = None) -> list[ProposedAction]:
+                        handoff_reason: str | None = None,
+                        signal_values: dict[str, Any] | None = None,
+                        bindings: dict[str, Any] | None = None,
+                        allowed_lead_fields: frozenset | None = None
+                        ) -> list[ProposedAction]:
         actions: list[ProposedAction] = []
         if handoff_reason is not None:
             actions.append(ProposedAction("handoff_to_human", {"reason": handoff_reason}))
@@ -378,4 +413,29 @@ class ConversationAgent:
             actions.append(self._follow_up("Actualizar preferencias del lead", contact_id, lead_id, now))
         else:  # general (and any unknown intent — fail soft, follow up only)
             actions.append(self._follow_up("Dar seguimiento al lead", contact_id, lead_id, now))
+        # Signal auto-fill (change: agent-custom-field-writes): one
+        # `set_custom_field_value` per resolved signal that is bound to a
+        # field which is still allowlisted, on a non-null lead. Anything
+        # unresolvable / unbound / disallowed / lead-less emits NOTHING —
+        # never guessed, never an empty value. Handoff returns above, so it
+        # stays mechanics-only.
+        if (lead_id is not None and signal_values and bindings
+                and allowed_lead_fields):
+            allowed = set(allowed_lead_fields)
+            for signal_key, value in signal_values.items():
+                if not isinstance(value, str) or not value:
+                    continue
+                binding = bindings.get(signal_key)
+                if not isinstance(binding, dict):
+                    continue
+                field_id = binding.get("field_id")
+                field_name = binding.get("field_name")
+                if (not isinstance(field_id, str) or not field_id
+                        or not isinstance(field_name, str) or not field_name):
+                    continue
+                if field_name not in allowed:
+                    continue
+                actions.append(ProposedAction("set_custom_field_value", {
+                    "field_id": field_id, "field_name": field_name,
+                    "value": value}))
         return actions
