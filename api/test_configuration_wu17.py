@@ -404,10 +404,19 @@ def http_scenarios() -> list[tuple[str, bool, str]]:
             allow_custom = _put(a, LEAD_FIELDS,
                                 {"allowed": ["stage_id", "status", custom3]},
                                 "wu17-t3-custom")
-            record("T3 allowlist custom-field name rejected by write path (D1)",
-                   envelope_ok(allow_custom, 400, "wu17-t3-custom",
-                               "invalid_command"),
+            ac3 = console_ok(allow_custom, "wu17-t3-custom", "allowlist")
+            record("T3 allowlist accepts a defined custom-field name (D4 closed)",
+                   ac3 is not None
+                   and custom3 in (ac3["allowlist"].get("allowed") or []),
                    f"status={allow_custom.status_code}")
+            # Restore the seeded allowlist so later scenarios see {stage_id, status}.
+            rst3 = _put(a, LEAD_FIELDS,
+                        {"allowed": ["stage_id", "status"],
+                         "idempotencyKey": "wu17-t3-restore"},
+                        "wu17-t3-restore")
+            record("T3 allowlist restored to seeded {stage_id, status}",
+                   console_ok(rst3, "wu17-t3-restore", "allowlist") is not None,
+                   "")
 
             undef3 = _put(a, LEAD_FIELDS, {"allowed": ["campo-inexistente"]},
                           "wu17-t3-undef")

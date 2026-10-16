@@ -81,7 +81,7 @@ def run_all() -> list[tuple[str, bool, str]]:
         record("S1 seeded global_auto is True", loaded.global_auto is True, "")
         record("S1 seeded handoff verdict escalate",
                loaded.matrix.get("handoff_to_human") == "escalate"
-               and len(loaded.matrix) == 7, f"matrix={loaded.matrix}")
+               and len(loaded.matrix) == 8, f"matrix={loaded.matrix}")
 
         # S2 overlay verdicts apply: loaded overrides reproduce defaults.
         corpus_ok = True
@@ -123,7 +123,7 @@ def run_all() -> list[tuple[str, bool, str]]:
             "SELECT * FROM agent_policy_matrix WHERE client_account_id = %s", (ACCOUNT_B,))
         allow_rows = await runner.query(
             "SELECT * FROM agent_field_allowlist WHERE client_account_id = %s", (ACCOUNT_B,))
-        assert settings_rows and len(matrix_rows) == 7 and allow_rows, "seed rows missing for B"
+        assert settings_rows and len(matrix_rows) == 8 and allow_rows, "seed rows missing for B"
         try:
             await runner.execute(
                 "DELETE FROM agent_policy_matrix WHERE client_account_id = %s", (ACCOUNT_B,))
@@ -172,7 +172,7 @@ def run_all() -> list[tuple[str, bool, str]]:
 
         # S6 restored clean: seed counts back.
         counts = {}
-        for table, want in (("agent_settings", 2), ("agent_policy_matrix", 14),
+        for table, want in (("agent_settings", 2), ("agent_policy_matrix", 16),
                             ("agent_field_allowlist", 4)):
             rows = await runner.query(f"SELECT count(*) AS n FROM {table}", ())
             counts[table] = int(rows[0]["n"])
