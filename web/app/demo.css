@@ -75,7 +75,10 @@ body{
 .violet{background:linear-gradient(135deg,var(--navy-600),var(--slate-800));color:var(--slate-100)}
 
 .nav-label{font:10px 'IBM Plex Mono',monospace;text-transform:uppercase;letter-spacing:.12em;color:var(--slate-400);margin:22px 12px 8px}
-.main-nav{display:grid;gap:3px}
+.main-nav{display:grid;gap:3px;flex:1 1 auto;min-height:0;overflow-y:auto;scrollbar-width:thin;scrollbar-color:rgba(148,178,208,.35) transparent}
+.main-nav::-webkit-scrollbar{width:8px}
+.main-nav::-webkit-scrollbar-thumb{background:rgba(148,178,208,.25);border-radius:4px}
+.main-nav::-webkit-scrollbar-track{background:transparent}
 .main-nav a,.sidebar-bottom>a{display:flex;align-items:center;gap:12px;text-decoration:none;color:var(--slate-400);padding:9px 12px;border-radius:8px;font-size:16px;transition:background .15s,color .15s}
 .main-nav a span,.sidebar-bottom>a span{width:16px;text-align:center;color:var(--slate-400);font-size:17px}
 .main-nav a:hover,.main-nav a.active{background:rgba(255,255,255,.05);color:var(--slate-50)}
