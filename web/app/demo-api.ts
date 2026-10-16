@@ -49,6 +49,9 @@ import {
   parseKbSelfTestResponse,
   parseLeadFieldsResponse,
   parseLeadFieldsWriteResponse,
+  parseSignalBindingsResponse,
+  parseSignalBindingWriteResponse,
+  parseSignalBindingDeleteResponse,
   parseCustomFieldDefinitionsResponse,
   parseCustomFieldValuesResponse,
   parseCustomFieldValuesWriteResponse,
@@ -93,6 +96,10 @@ import {
   type LeadFieldsInput,
   type LeadFieldsResponse,
   type LeadFieldsWriteResponse,
+  type CreateSignalBindingInput,
+  type SignalBindingsResponse,
+  type SignalBindingWriteResponse,
+  type SignalBindingDeleteResponse,
   type CreateCustomFieldInput,
   type UpdateCustomFieldInput,
   type SetLeadCustomValuesInput,
@@ -175,6 +182,11 @@ export type DemoApi = {
   updateCalendarConfig: (body: CalendarConfigInput, options?: RuntimeHttpCallOptions) => Promise<CalendarConfigWriteResponse>;
   getLeadFields: (options?: RuntimeHttpCallOptions) => Promise<LeadFieldsResponse>;
   updateLeadFields: (body: LeadFieldsInput, options?: RuntimeHttpCallOptions) => Promise<LeadFieldsWriteResponse>;
+  /** WU18 signal bindings ("Fuentes del agente"): scope is server-derived, never a client account id. */
+  listSignalBindings: (options?: RuntimeHttpCallOptions) => Promise<SignalBindingsResponse>;
+  getSignalBindings: (options?: RuntimeHttpCallOptions) => Promise<SignalBindingsResponse>;
+  createSignalBinding: (body: CreateSignalBindingInput, options?: RuntimeHttpCallOptions) => Promise<SignalBindingWriteResponse>;
+  deleteSignalBinding: (signalKey: string, options?: RuntimeHttpCallOptions) => Promise<SignalBindingDeleteResponse>;
   /** WU17 configuration console: scope is server-derived, never a client account id. */
   listCustomFields: (options?: RuntimeHttpCallOptions) => Promise<CustomFieldDefinitionsResponse>;
   createCustomField: (body: CreateCustomFieldInput, options?: RuntimeHttpCallOptions) => Promise<CustomFieldWriteResponse>;
@@ -303,6 +315,14 @@ export function createDemoApi(baseUrl: string, fetcher?: DemoApiFetcher): DemoAp
       runtime.get("/v1/demo/agent/lead-fields", options ?? {}, parseLeadFieldsResponse),
     updateLeadFields: (body, options) =>
       runtime.put("/v1/demo/agent/lead-fields", body, options ?? {}, parseLeadFieldsWriteResponse),
+    listSignalBindings: (options) =>
+      runtime.get("/v1/demo/agent/signal-bindings", options ?? {}, parseSignalBindingsResponse),
+    getSignalBindings: (options) =>
+      runtime.get("/v1/demo/agent/signal-bindings", options ?? {}, parseSignalBindingsResponse),
+    createSignalBinding: (body, options) =>
+      runtime.post("/v1/demo/agent/signal-bindings", body, options ?? {}, parseSignalBindingWriteResponse),
+    deleteSignalBinding: (signalKey, options) =>
+      runtime.delete(`/v1/demo/agent/signal-bindings/${encodeURIComponent(signalKey)}`, options ?? {}, parseSignalBindingDeleteResponse),
     listCustomFields: (options) =>
       runtime.get("/v1/demo/agent/custom-fields", options ?? {}, parseCustomFieldDefinitionsResponse),
     createCustomField: (body, options) =>
@@ -437,6 +457,7 @@ export const ACTION_LABELS: Record<string, string> = {
   transition_lead: "Avanzar prospecto de etapa",
   send_reply: "Enviar respuesta al lead",
   handoff_to_human: "Derivar a un humano",
+  set_custom_field_value: "Guardar valor en campo personalizado",
 };
 
 /** Spanish label for the persisted policy verdict (server stays language-neutral). */

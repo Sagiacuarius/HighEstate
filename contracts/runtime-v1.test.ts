@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   CORRELATION_ID_MAX_LENGTH,
+  SIGNAL_KEYS,
+  AGENT_CONSOLE_ACTION_TYPES,
   correlationId,
   correlationIdOrGenerate,
   idempotencyKey,
@@ -35,6 +37,9 @@ import {
   parseCustomFieldWriteResponse,
   parseContactsByTagResponse,
   parseContactTagsResponse,
+  parseSignalBindingsResponse,
+  parseSignalBindingWriteResponse,
+  parseSignalBindingDeleteResponse,
   parseLivenessResponse,
   parseReadinessResponse,
 } from "./runtime-v1";
@@ -746,5 +751,79 @@ describe("configuration console contracts (WU17)", () => {
       timezone: "America/New_York", correlation_id: "c",
     }));
     expect(writeTz.calendar_config.timezone).toBe("America/New_York");
+  });
+});
+
+/* --- Agent Custom Field Writes WU18: signal bindings ("Fuentes del agente") --- */
+
+function signalBindingFixture(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    signal_key: "phone",
+    field_definition_id: "cf000000-0000-0000-0000-000000000001",
+    field_name: "telefono",
+    field_type: "text",
+    ...overrides,
+  };
+}
+
+describe("signal binding contracts (WU18)", () => {
+  it("exposes the closed 7-key catalog and the 8-type console matrix", () => {
+    expect(SIGNAL_KEYS).toEqual([
+      "phone", "email", "presupuesto_max", "barrio",
+      "tipo_propiedad", "fecha_objetivo", "medio_de_contacto",
+    ]);
+    expect(AGENT_CONSOLE_ACTION_TYPES).toContain("set_custom_field_value");
+    expect(AGENT_CONSOLE_ACTION_TYPES).toHaveLength(8);
+  });
+
+  it("parses the list, write, and delete envelopes", () => {
+    const list = parseSignalBindingsResponse(consoleEnvelope("signal_bindings", {
+      count: 1, items: [signalBindingFixture()],
+    }));
+    expect(list.signal_bindings.count).toBe(1);
+    expect(list.signal_bindings.items[0].signal_key).toBe("phone");
+    expect(list.signal_bindings.items[0].field_name).toBe("telefono");
+
+    const empty = parseSignalBindingsResponse(consoleEnvelope("signal_bindings", {
+      count: 0, items: [],
+    }));
+    expect(empty.signal_bindings.items).toEqual([]);
+
+    const write = parseSignalBindingWriteResponse(consoleEnvelope("signal_binding",
+      signalBindingFixture({ signal_key: "barrio", field_type: "select" })));
+    expect(write.signal_binding.signal_key).toBe("barrio");
+    expect(write.signal_binding.field_type).toBe("select");
+
+    const del = parseSignalBindingDeleteResponse(consoleEnvelope("signal_binding", {
+      signal_key: "phone", deleted: true,
+    }));
+    expect(del.signal_binding).toEqual({ signal_key: "phone", deleted: true });
+  });
+
+  it("rejects unknown signal keys, invalid field types, and unknown nested keys", () => {
+    expect(() => parseSignalBindingsResponse(consoleEnvelope("signal_bindings", {
+      count: 1, items: [signalBindingFixture({ signal_key: "cohetes" })],
+    }))).toThrow(/signal/);
+    expect(() => parseSignalBindingsResponse(consoleEnvelope("signal_bindings", {
+      count: 1, items: [signalBindingFixture({ field_type: "boolean" })],
+    }))).toThrow(/field_type/);
+    expect(() => parseSignalBindingsResponse(consoleEnvelope("signal_bindings", {
+      count: 1, items: [signalBindingFixture({ rogue: 1 })],
+    }))).toThrow(/unknown key/);
+    expect(() => parseSignalBindingsResponse(consoleEnvelope("signal_bindings", {
+      count: 1, items: [signalBindingFixture()], rogue: 1,
+    }))).toThrow(/unknown key/);
+    expect(() => parseSignalBindingsResponse(consoleEnvelope("signal_bindings", {
+      count: 1, items: [signalBindingFixture()],
+    }, { rogue: 1 }))).toThrow(/unknown key/);
+    expect(() => parseSignalBindingWriteResponse(consoleEnvelope("signal_binding",
+      signalBindingFixture({ signal_key: "fax" })))).toThrow(/signal/);
+    expect(() => parseSignalBindingDeleteResponse(consoleEnvelope("signal_binding", {
+      signal_key: "phone", deleted: "yes",
+    }))).toThrow(/deleted/);
+    expect(() => parseSignalBindingDeleteResponse(consoleEnvelope("signal_binding", {
+      signal_key: "phone", deleted: true, rogue: 1,
+    }))).toThrow(/unknown key/);
+    expect(() => parseSignalBindingsResponse(null)).toThrow();
   });
 });

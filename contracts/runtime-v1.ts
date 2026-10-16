@@ -1193,7 +1193,7 @@ export function parseDemoSimulateResponse(value: unknown): DemoSimulateResponse 
  */
 export const AGENT_CONSOLE_ENVIRONMENT = "dev-only-agent" as const;
 
-/** The 7 CHECK-domain action names of agent_policy_matrix. */
+/** The 8 CHECK-domain action names of agent_policy_matrix (WU18 adds set_custom_field_value). */
 export const AGENT_CONSOLE_ACTION_TYPES: readonly string[] = [
   "send_reply",
   "register_interest",
@@ -1202,6 +1202,7 @@ export const AGENT_CONSOLE_ACTION_TYPES: readonly string[] = [
   "create_event",
   "reschedule_event",
   "handoff_to_human",
+  "set_custom_field_value",
 ];
 
 export type AgentConsoleVerdict = "auto" | "escalate";
@@ -2093,6 +2094,116 @@ export function parseCustomFieldWriteResponse(value: unknown): CustomFieldWriteR
       name: optAbsentStr(payload, "name", "custom field write.name"),
       type: optCustomFieldType(payload.type, "custom field write.type"),
       choices: optStringList(payload.choices, "custom field write.choices"),
+    },
+  };
+}
+
+/**
+ * Agent Custom Field Writes WU18 — signal bindings ("Fuentes del agente",
+ * mirror api/routes/agent_wu14.py signal-binding routes on build_agent_router:
+ * GET /agent/signal-bindings, POST /agent/signal-bindings
+ * {signal_key, field_definition_id}, DELETE /agent/signal-bindings/{signal_key}).
+ * Same console envelope; scope is server-derived. The signal catalog is
+ * closed: unknown signal keys fail closed (400 server-side, throw client-side).
+ */
+export const SIGNAL_KEYS: readonly string[] = [
+  "phone",
+  "email",
+  "presupuesto_max",
+  "barrio",
+  "tipo_propiedad",
+  "fecha_objetivo",
+  "medio_de_contacto",
+];
+
+export type SignalBinding = {
+  signal_key: string;
+  field_definition_id: string;
+  field_name: string;
+  field_type: CustomFieldType;
+};
+
+export type SignalBindingsResponse = AgentConsoleBase & {
+  signal_bindings: { count: number; items: SignalBinding[] };
+};
+
+export type SignalBindingWriteResponse = AgentConsoleBase & {
+  signal_binding: SignalBinding;
+};
+
+export type SignalBindingDeleteResponse = AgentConsoleBase & {
+  signal_binding: { signal_key: string; deleted: boolean };
+};
+
+/** Write input — scope is server-derived; no account id appears here. */
+export type CreateSignalBindingInput = {
+  signal_key: string;
+  field_definition_id: string;
+  idempotencyKey?: string;
+};
+
+function reqSignalKey(value: unknown, label: string): string {
+  if (typeof value !== "string" || !SIGNAL_KEYS.includes(value)) {
+    throw new Error(`Invalid ${label}: unknown signal "${String(value)}"`);
+  }
+  return value;
+}
+
+function parseSignalBinding(value: unknown, label: string): SignalBinding {
+  const record = reqRecord(value, label);
+  for (const key of Object.keys(record)) {
+    if (
+      key !== "signal_key" && key !== "field_definition_id" &&
+      key !== "field_name" && key !== "field_type"
+    ) {
+      throw new Error(`Invalid ${label} key: unknown key "${key}"`);
+    }
+  }
+  return {
+    signal_key: reqSignalKey(record.signal_key, `${label}.signal_key`),
+    field_definition_id: reqStr(record, "field_definition_id", `${label}.field_definition_id`),
+    field_name: reqStr(record, "field_name", `${label}.field_name`),
+    field_type: reqCustomFieldType(record.field_type, `${label}.field_type`),
+  };
+}
+
+export function parseSignalBindingsResponse(value: unknown): SignalBindingsResponse {
+  const { correlation, replayed, payload } = parseConsoleEnvelope(value, "signal_bindings", "signal bindings");
+  for (const key of Object.keys(payload)) {
+    if (key !== "count" && key !== "items") {
+      throw new Error(`Invalid signal bindings key: unknown key "${key}"`);
+    }
+  }
+  const items = reqArray(payload.items, "signal bindings.items")
+    .map((entry, index) => parseSignalBinding(entry, `signal binding[${index}]`));
+  return {
+    ...consoleBase(correlation, replayed),
+    signal_bindings: { count: reqNum(payload, "count", "signal bindings.count"), items },
+  };
+}
+
+export function parseSignalBindingWriteResponse(value: unknown): SignalBindingWriteResponse {
+  const { correlation, replayed, payload } = parseConsoleEnvelope(value, "signal_binding", "signal binding write");
+  return {
+    ...consoleBase(correlation, replayed),
+    signal_binding: parseSignalBinding(payload, "signal binding write"),
+  };
+}
+
+export function parseSignalBindingDeleteResponse(value: unknown): SignalBindingDeleteResponse {
+  const { correlation, replayed, payload } = parseConsoleEnvelope(value, "signal_binding", "signal binding delete");
+  for (const key of Object.keys(payload)) {
+    if (key !== "signal_key" && key !== "deleted") {
+      throw new Error(`Invalid signal binding delete key: unknown key "${key}"`);
+    }
+  }
+  const deleted = payload.deleted;
+  if (typeof deleted !== "boolean") throw new Error("Invalid signal binding delete.deleted");
+  return {
+    ...consoleBase(correlation, replayed),
+    signal_binding: {
+      signal_key: reqSignalKey(payload.signal_key, "signal binding delete.signal_key"),
+      deleted,
     },
   };
 }

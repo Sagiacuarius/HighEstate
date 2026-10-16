@@ -84,6 +84,11 @@ from api.application.agent_policy import (
     AUTO_EVENT_CREATION,
     ESCALATION_MECHANICS,
 )
+from api.application.agent_signal_bindings_commands import (
+    CreateSignalBindingCommand,
+    DeleteSignalBindingCommand,
+)
+from api.application.agent_signals import SIGNAL_KEYS
 from api.application.calendar_commands_wu13 import (
     CreateCalendarEventCommand,
     UpdateCalendarEventCommand,
@@ -133,6 +138,7 @@ _NOT_FOUND_REASONS = frozenset({
     "draft_not_found_in_scope",
     "prompt_version_not_found_in_scope", "kb_article_not_found_in_scope",
     "custom_field_not_found_in_scope", "lead_not_found_in_scope",
+    "signal_binding_not_found_in_scope",
 })
 _CONFLICT_REASONS = frozenset({"draft_not_proposed", "draft_not_approved"})
 
@@ -157,6 +163,8 @@ _CUSTOM_FIELD_KEYS = frozenset({"name", "type", "choices", "idempotencyKey"})
 _CUSTOM_FIELD_DELETE_KEYS = frozenset({"idempotencyKey"})
 _CUSTOM_VALUES_KEYS = frozenset({"values", "idempotencyKey"})
 _TAGS_KEYS = frozenset({"tag", "idempotencyKey"})
+_SIGNAL_BINDING_KEYS = frozenset({"signal_key", "field_definition_id",
+                                  "idempotencyKey"})
 
 
 def _iso(value: datetime | None) -> str | None:
@@ -571,6 +579,8 @@ def build_agent_router(conn_kwargs: dict[str, Any], model_provider: Any | None =
     custom_field_set_cmd = SetLeadCustomFieldValueCommand(dict(conn_kwargs))
     add_tag_cmd = AddContactTagCommand(dict(conn_kwargs))
     remove_tag_cmd = RemoveContactTagCommand(dict(conn_kwargs))
+    signal_binding_create_cmd = CreateSignalBindingCommand(dict(conn_kwargs))
+    signal_binding_delete_cmd = DeleteSignalBindingCommand(dict(conn_kwargs))
 
     async def _context(request: Request, correlation: str):
         composition = request.app.state.demo_composition
@@ -1787,5 +1797,123 @@ def build_agent_router(conn_kwargs: dict[str, Any], model_provider: Any | None =
         return _console_ok(correlation, "tags", {
             "contact_id": str(contact_id), "tags": outcome.payload["tags"]},
             replayed=outcome.replayed)
+
+    # --- Agent signal bindings (WU18, additive; "Fuentes del agente") ---
+
+    @router.get(f"{AGENT_PREFIX}/signal-bindings")
+    async def list_signal_bindings(request: Request):
+        correlation = request.state.correlation_id
+        context, error = await _context(request, correlation)
+        if error is not None:
+            return error
+        try:
+            bound = await load_signal_bindings(context, runner)
+        except Exception:
+            bound = {}
+        try:
+            definitions = await load_custom_field_definitions(context, runner)
+        except Exception:
+            definitions = []
+        by_id = {str(d["id"]): d for d in definitions if d.get("id")}
+        items = []
+        for signal_key in sorted(bound):
+            field_id = str(bound[signal_key])
+            definition = by_id.get(field_id)
+            if definition is None:
+                continue
+            items.append({"signal_key": signal_key,
+                          "field_definition_id": field_id,
+                          "field_name": definition["name"],
+                          "field_type": definition["type"]})
+        return _console_ok(correlation, "signal_bindings", {
+            "count": len(items), "items": items,
+        })
+
+    @router.post(f"{AGENT_PREFIX}/signal-bindings")
+    async def create_signal_binding(request: Request):
+        correlation = request.state.correlation_id
+        context, error = await _context(request, correlation)
+        if error is not None:
+            return error
+        raw, error = await _console_body(request, correlation,
+                                         _SIGNAL_BINDING_KEYS)
+        if error is not None:
+            return error
+        signal_key = raw.get("signal_key")
+        if not isinstance(signal_key, str) or not signal_key.strip():
+            return envelope(400, "invalid_command",
+                            "signal_key must be a non-empty string",
+                            correlation)
+        signal_key = signal_key.strip()
+        if signal_key not in SIGNAL_KEYS:
+            return envelope(400, "invalid_command",
+                            f"signal_key is invalid: {signal_key}",
+                            correlation)
+        account_id = context.client_account.id
+        try:
+            outcome = await signal_binding_create_cmd.execute_create(
+                context, signal_key=signal_key,
+                field_definition_id=raw.get("field_definition_id"),
+                idempotency_key=_console_key(
+                    account_id, f"signal-binding:{signal_key}", raw,
+                    {"signal_key": signal_key,
+                     "field_definition_id":
+                         raw.get("field_definition_id")}))
+        except CrmCommandDenied as problem:
+            return _denial(problem, correlation)
+        except CrmCommandValidationError as problem:
+            return envelope(400, "invalid_command", str(problem), correlation)
+        except IdempotencyConflict:
+            return envelope(409, "tenant_idempotency_conflict",
+                            "command idempotency conflict", correlation)
+        composition = request.app.state.demo_composition
+        composition.cache.invalidate_scope(context.agency.id, account_id)
+        try:
+            definitions = await load_custom_field_definitions(context, runner)
+        except Exception:
+            definitions = []
+        definition = next(
+            (d for d in definitions
+             if str(d.get("id")) == outcome.payload["field_definition_id"]),
+            None)
+        if definition is None:
+            return envelope(404, "resource_not_found",
+                            "resource is not available in this account scope",
+                            correlation)
+        return _console_ok(correlation, "signal_binding", {
+            "signal_key": outcome.payload["signal_key"],
+            "field_definition_id": outcome.payload["field_definition_id"],
+            "field_name": definition["name"],
+            "field_type": definition["type"],
+        }, replayed=outcome.replayed)
+
+    @router.delete(f"{AGENT_PREFIX}/signal-bindings/{{signal_key}}")
+    async def delete_signal_binding(request: Request, signal_key: str):
+        correlation = request.state.correlation_id
+        context, error = await _context(request, correlation)
+        if error is not None:
+            return error
+        if signal_key not in SIGNAL_KEYS:
+            return envelope(400, "invalid_command",
+                            f"signal_key is invalid: {signal_key}",
+                            correlation)
+        account_id = context.client_account.id
+        try:
+            outcome = await signal_binding_delete_cmd.execute_delete(
+                context, signal_key=signal_key,
+                idempotency_key=f"console:{account_id}:signal-binding:"
+                                f"{signal_key}")
+        except CrmCommandDenied as problem:
+            return _denial(problem, correlation)
+        except CrmCommandValidationError as problem:
+            return envelope(400, "invalid_command", str(problem), correlation)
+        except IdempotencyConflict:
+            return envelope(409, "tenant_idempotency_conflict",
+                            "command idempotency conflict", correlation)
+        composition = request.app.state.demo_composition
+        composition.cache.invalidate_scope(context.agency.id, account_id)
+        return _console_ok(correlation, "signal_binding", {
+            "signal_key": outcome.payload["signal_key"], "deleted": True,
+        }, replayed=outcome.replayed)
 
     return router

@@ -119,7 +119,8 @@ function consoleOk(resource: string, payload: unknown): unknown {
 }
 
 const CONSOLE_ACTIONS = ["send_reply", "register_interest", "create_follow_up",
-  "transition_lead", "create_event", "reschedule_event", "handoff_to_human"];
+  "transition_lead", "create_event", "reschedule_event", "handoff_to_human",
+  "set_custom_field_value"];
 const CONSOLE_GATED = ["create_event", "reschedule_event", "handoff_to_human"];
 
 let settingsPayload: () => unknown = () => ({
@@ -161,7 +162,13 @@ let calCfgPayload: () => unknown = () => ({
   working_days: [0, 1, 2, 3, 4, 5], destination_label: null, account_id: "acct-1",
 });
 let fieldsPayload: () => unknown = () => ({ allowed: ["stage_id", "status"], account_id: "acct-1" });
+let bindingsPayload: () => unknown = () => ({ count: 0, items: [] });
+let customFieldsPayload: () => unknown = () => ({
+  count: 1,
+  items: [{ id: "cf-1", name: "telefono", type: "text", choices: [] }],
+});
 let consoleWriteFail: { status: number; code: string; correlation: string } | null = null;
+let bindingsFail: { status: number; code: string; correlation: string } | null = null;
 
 function errResponse(fail: { status: number; code: string; correlation: string }): Response {
   return new Response(JSON.stringify({
@@ -177,6 +184,12 @@ function stubFetch(): void {
   statePage = () => agentState();
   stateFail = null;
   consoleWriteFail = null;
+  bindingsFail = null;
+  bindingsPayload = () => ({ count: 0, items: [] });
+  customFieldsPayload = () => ({
+    count: 1,
+    items: [{ id: "cf-1", name: "telefono", type: "text", choices: [] }],
+  });
   selfTestPayload = () => ({
     match: true,
     article: { id: "k1", category: "visitas", question: "¿Puedo visitar el sábado?" },
@@ -265,6 +278,28 @@ function stubFetch(): void {
         allowed: (fieldsPayload() as { allowed: unknown }).allowed,
         correlation_id: "c1",
       }));
+    }
+    if (parsed.pathname === "/v1/demo/agent/signal-bindings") {
+      if (method === "GET") return jsonOk(consoleOk("signal_bindings", bindingsPayload()));
+      if (bindingsFail) return errResponse(bindingsFail);
+      const posted = typeof init?.body === "string"
+        ? JSON.parse(init.body) as Record<string, unknown> : {};
+      return jsonOk(consoleOk("signal_binding", {
+        signal_key: posted.signal_key ?? "phone",
+        field_definition_id: posted.field_definition_id ?? "cf-1",
+        field_name: "telefono",
+        field_type: "text",
+      }));
+    }
+    if (/^\/v1\/demo\/agent\/signal-bindings\/.+$/.test(parsed.pathname) && method === "DELETE") {
+      if (bindingsFail) return errResponse(bindingsFail);
+      const signal = decodeURIComponent(parsed.pathname.split("/").pop() as string);
+      return jsonOk(consoleOk("signal_binding", { signal_key: signal, deleted: true }));
+    }
+    if (parsed.pathname === "/v1/demo/agent/custom-fields") {
+      if (method === "GET") return jsonOk(consoleOk("custom_fields", customFieldsPayload()));
+      if (consoleWriteFail) return errResponse(consoleWriteFail);
+      return jsonOk(consoleOk("custom_field", { resource_id: "cf-1", correlation_id: "c1" }));
     }
     const body = READ_BODIES[parsed.pathname];
     if (body) return jsonOk(body);
@@ -498,9 +533,10 @@ describe("WU16 agent console: Agente view with five sections", () => {
       expect(body.global_auto).toBe(true);
       expect(body.calendar_auto_enabled).toBe(true);
       const matrix = body.matrix as Array<{ action_type: string; verdict: string }>;
-      expect(matrix).toHaveLength(7);
+      expect(matrix).toHaveLength(8);
       expect(matrix.find((e) => e.action_type === "create_event")?.verdict).toBe("auto");
       expect(matrix.find((e) => e.action_type === "handoff_to_human")?.verdict).toBe("escalate");
+      expect(matrix.find((e) => e.action_type === "set_custom_field_value")?.verdict).toBe("auto");
       for (const c of puts) expect(c.url).not.toMatch(/clientAccountId|account_id=/);
       expect(JSON.stringify(body)).not.toMatch(/client_account_id/);
     });
@@ -578,6 +614,105 @@ describe("WU16 agent console: Agente view with five sections", () => {
     await openAgente();
     fireEvent.click(await screen.findByRole("button", { name: "Guardar ajustes" }));
     expect(await screen.findByText(/corr-console-err/)).toBeTruthy();
+    expect(screen.getByText(/400 · invalid_command/)).toBeTruthy();
+  });
+});
+
+describe("WU18 Fuentes del agente: signal bindings console section", () => {
+  beforeEach(() => stubFetch());
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
+
+  async function openAgente(): Promise<void> {
+    await waitFor(() => {
+      if (!document.querySelector('.main-nav a[href="#agente"]')) throw new Error("nav not ready");
+    });
+    fireEvent.click(document.querySelector('.main-nav a[href="#agente"]') as HTMLElement);
+    await screen.findByText("Fuentes del agente", { selector: "h3" });
+  }
+
+  it("renders the section with the closed signal catalog, field options, and live bindings", async () => {
+    bindingsPayload = () => ({
+      count: 1,
+      items: [{
+        signal_key: "phone", field_definition_id: "cf-1",
+        field_name: "telefono", field_type: "text",
+      }],
+    });
+    const { default: DashboardPage } = await import("./page");
+    render(React.createElement(DashboardPage));
+    await openAgente();
+    expect(screen.getByText("Fuentes del agente", { selector: "h3" })).toBeTruthy();
+    const signalSelect = screen.getByLabelText("Señal") as HTMLSelectElement;
+    expect(signalSelect.options.length).toBe(7);
+    expect(screen.getByText("Teléfono", { selector: "option" })).toBeTruthy();
+    const fieldSelect = screen.getByLabelText("Campo personalizado") as HTMLSelectElement;
+    expect(fieldSelect.options.length).toBe(2);
+    expect(screen.getByText(/telefono · Texto/)).toBeTruthy();
+    const bindingsTable = screen.getByRole("table", { name: "Enlaces señal a campo" });
+    expect(bindingsTable.textContent).toMatch(/telefono/);
+    expect(screen.getByRole("button", { name: "Eliminar enlace phone" })).toBeTruthy();
+  });
+
+  it("renders the empty state when no bindings exist", async () => {
+    const { default: DashboardPage } = await import("./page");
+    render(React.createElement(DashboardPage));
+    await openAgente();
+    expect(await screen.findByText(/Sin enlaces/)).toBeTruthy();
+  });
+
+  it("create posts the typed signal payload and refreshes the list", async () => {
+    const { default: DashboardPage } = await import("./page");
+    render(React.createElement(DashboardPage));
+    await openAgente();
+    await screen.findByText(/Sin enlaces/);
+    fireEvent.change(screen.getByLabelText("Campo personalizado"), { target: { value: "cf-1" } });
+    fireEvent.click(screen.getByRole("button", { name: "Crear enlace" }));
+    await waitFor(() => {
+      const posts = calls.filter((c) => c.url.endsWith("/v1/demo/agent/signal-bindings") && c.method === "POST");
+      expect(posts.length).toBe(1);
+      expect(posts[0].body).toEqual({ signal_key: "phone", field_definition_id: "cf-1" });
+      for (const c of posts) expect(c.url).not.toMatch(/clientAccountId|account_id=/);
+      expect(JSON.stringify(posts[0].body)).not.toMatch(/client_account_id/);
+    });
+    expect(await screen.findByText("Enlace de señal creado")).toBeTruthy();
+    await waitFor(() => {
+      const gets = calls.filter((c) => c.url.endsWith("/v1/demo/agent/signal-bindings") && c.method === "GET");
+      expect(gets.length).toBeGreaterThan(1);
+    });
+  });
+
+  it("delete wires the per-signal route and refreshes the list", async () => {
+    bindingsPayload = () => ({
+      count: 1,
+      items: [{
+        signal_key: "phone", field_definition_id: "cf-1",
+        field_name: "telefono", field_type: "text",
+      }],
+    });
+    const { default: DashboardPage } = await import("./page");
+    render(React.createElement(DashboardPage));
+    await openAgente();
+    fireEvent.click(await screen.findByRole("button", { name: "Eliminar enlace phone" }));
+    await waitFor(() => {
+      const deletes = calls.filter((c) => c.url.endsWith("/v1/demo/agent/signal-bindings/phone") && c.method === "DELETE");
+      expect(deletes.length).toBe(1);
+      for (const c of deletes) expect(c.url).not.toMatch(/clientAccountId|account_id=/);
+    });
+    expect(await screen.findByText("Enlace de señal eliminado")).toBeTruthy();
+  });
+
+  it("binding failure surfaces the envelope with correlation", async () => {
+    bindingsFail = { status: 400, code: "invalid_command", correlation: "corr-bind-err" };
+    const { default: DashboardPage } = await import("./page");
+    render(React.createElement(DashboardPage));
+    await openAgente();
+    await screen.findByText(/Sin enlaces/);
+    fireEvent.change(screen.getByLabelText("Campo personalizado"), { target: { value: "cf-1" } });
+    fireEvent.click(screen.getByRole("button", { name: "Crear enlace" }));
+    expect(await screen.findByText(/corr-bind-err/)).toBeTruthy();
     expect(screen.getByText(/400 · invalid_command/)).toBeTruthy();
   });
 });

@@ -34,6 +34,7 @@ import {
   CUSTOM_FIELD_TYPES,
   KB_ARTICLE_CATEGORIES,
   LEAD_FIELD_COLUMNS,
+  SIGNAL_KEYS,
 } from "../../contracts/runtime-v1";
 import type {
   AgentCalendarConfig,
@@ -49,6 +50,7 @@ import type {
   CustomFieldType,
   DemoContextResponse,
   KbSelfTestProbe,
+  SignalBinding,
 } from "../../contracts/runtime-v1";
 
 export const dynamic = "force-dynamic";
@@ -170,6 +172,17 @@ const LEAD_FIELD_LABELS: Record<string, string> = {
   selected_property_id: "Propiedad elegida",
 };
 
+// WU18: etiquetas en español neutro para el catálogo cerrado de señales.
+const SIGNAL_LABELS: Record<string, string> = {
+  phone: "Teléfono",
+  email: "Correo electrónico",
+  presupuesto_max: "Presupuesto máximo",
+  barrio: "Barrio",
+  tipo_propiedad: "Tipo de propiedad",
+  fecha_objetivo: "Fecha objetivo",
+  medio_de_contacto: "Medio de contacto",
+};
+
 const CONSOLE_ACTION_LABELS: Record<string, string> = {
   ...ACTION_LABELS,
   handoff_to_human: "Derivar a un humano",
@@ -228,7 +241,7 @@ export default function DashboardPage(): React.ReactElement {
   // + handoff resume); null while unloaded or when the read fails closed.
   const [agentState, setAgentState] = React.useState<AgentStateResponse | null>(null);
   const [modeBusy, setModeBusy] = React.useState(false);
-  // WU16 Agent Console: cinco secciones sobre /v1/demo/agent/* (alcance
+  // WU16 Agent Console: seis secciones sobre /v1/demo/agent/* (alcance
   // derivado por el servidor; ningún payload lleva ids de cuenta). Cada
   // mutación refresca su lectura; los fallos muestran el envelope + correlación.
   const [consoleSettings, setConsoleSettings] = React.useState<AgentSettings | null>(null);
@@ -243,6 +256,9 @@ export default function DashboardPage(): React.ReactElement {
   const [editingKbId, setEditingKbId] = React.useState<string | null>(null);
   const [calendarConfig, setCalendarConfig] = React.useState<AgentCalendarConfig | null>(null);
   const [leadFields, setLeadFields] = React.useState<string[]>([]);
+  // WU18: enlaces señal → campo ("Fuentes del agente"); sin enlaces el agente
+  // no emite set_custom_field_value (extracción omitida).
+  const [signalBindings, setSignalBindings] = React.useState<SignalBinding[]>([]);
   // WU17: campos personalizados + etiquetas de contactos (alcance derivado por
   // el servidor). Carga y error independientes del resto de la consola.
   const [customFields, setCustomFields] = React.useState<CustomFieldDefinition[]>([]);
@@ -258,13 +274,14 @@ export default function DashboardPage(): React.ReactElement {
     setConsoleLoading(true);
     setConsoleError(null);
     try {
-      const [settings, prompts, preview, articles, calCfg, fields] = await Promise.all([
+      const [settings, prompts, preview, articles, calCfg, fields, bindings] = await Promise.all([
         client.getConsoleSettings(),
         client.listPrompts(),
         client.previewPrompt(),
         client.listKbArticles(),
         client.getCalendarConfig(),
         client.getLeadFields(),
+        client.listSignalBindings(),
       ]);
       setConsoleSettings(settings.settings);
       setPromptList(prompts.prompts.items);
@@ -272,6 +289,7 @@ export default function DashboardPage(): React.ReactElement {
       setKbArticles(articles.articles.items);
       setCalendarConfig(calCfg.calendar_config);
       setLeadFields(fields.allowlist.allowed);
+      setSignalBindings(bindings.signal_bindings.items);
     } catch (error) {
       setConsoleError(consoleFailure(error));
     } finally {
@@ -572,8 +590,49 @@ export default function DashboardPage(): React.ReactElement {
     }
   };
 
-  const submitTagFilter = async (event: React.FormEvent<HTMLFormElement>): Promise<void> => {
+  const submitCreateSignalBinding = async (event: React.FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
+    if (!api || consoleBusy) return;
+    const formEl = event.currentTarget;
+    const form = new FormData(formEl);
+    const signal_key = String(form.get("signal_key") ?? "").trim();
+    const field_definition_id = String(form.get("field_definition_id") ?? "").trim();
+    if (!signal_key || !field_definition_id) {
+      setConsoleNote("Elegí una señal y un campo antes de crear el enlace.");
+      return;
+    }
+    setConsoleBusy(true);
+    setConsoleNote(null);
+    try {
+      await api.createSignalBinding({ signal_key, field_definition_id });
+      formEl.reset();
+      const fresh = await api.listSignalBindings();
+      setSignalBindings(fresh.signal_bindings.items);
+      setConsoleNote("Enlace de señal creado");
+    } catch (error) {
+      setConsoleNote(`Crear enlace falló: ${consoleFailure(error)}`);
+    } finally {
+      setConsoleBusy(false);
+    }
+  };
+
+  const runDeleteSignalBinding = async (signalKey: string): Promise<void> => {
+    if (!api || consoleBusy) return;
+    setConsoleBusy(true);
+    setConsoleNote(null);
+    try {
+      await api.deleteSignalBinding(signalKey);
+      const fresh = await api.listSignalBindings();
+      setSignalBindings(fresh.signal_bindings.items);
+      setConsoleNote("Enlace de señal eliminado");
+    } catch (error) {
+      setConsoleNote(`Eliminar enlace falló: ${consoleFailure(error)}`);
+    } finally {
+      setConsoleBusy(false);
+    }
+  };
+
+  const submitTagFilter = async (event: React.FormEvent<HTMLFormElement>): Promise<void> => {    event.preventDefault();
     if (!api || consoleBusy) return;
     const form = new FormData(event.currentTarget);
     const tag = String(form.get("tag") ?? "").trim();
@@ -1621,7 +1680,7 @@ export default function DashboardPage(): React.ReactElement {
                 <div><p className="eyebrow">Consola · solo demo</p><h2>Agente · consola de autonomía</h2></div>
                 <button className="ghost-btn" disabled={consoleLoading} onClick={() => api && void loadConsole(api)}>Recargar</button>
               </div>
-              <p className="empty-note">Rutas <code>GET/PUT /v1/demo/agent/settings</code>, <code>/prompts</code>, <code>/kb/articles</code>, <code>/calendar-config</code> y <code>/lead-fields</code>; el alcance lo deriva el servidor.</p>
+              <p className="empty-note">Rutas <code>GET/PUT /v1/demo/agent/settings</code>, <code>/prompts</code>, <code>/kb/articles</code>, <code>/calendar-config</code>, <code>/lead-fields</code> y <code>/signal-bindings</code>; el alcance lo deriva el servidor.</p>
               {consoleError ? <p className="empty-note"><code>{consoleError}</code></p> : null}
               {consoleNote ? <p className="empty-note">{consoleNote}</p> : null}
               {consoleLoading ? <p className="empty-note">Cargando consola…</p> : null}
@@ -1813,6 +1872,39 @@ export default function DashboardPage(): React.ReactElement {
                   </tbody>
                 </table>
               ) : null}
+              <h3>Fuentes del agente</h3>
+              <form className="audit-filters" onSubmit={(e) => void submitCreateSignalBinding(e)} aria-label="Crear enlace de señal">
+                <label>Señal
+                  <select name="signal_key" aria-label="Señal" defaultValue="phone">
+                    {SIGNAL_KEYS.map((signal) => <option key={signal} value={signal}>{SIGNAL_LABELS[signal] ?? signal}</option>)}
+                  </select>
+                </label>
+                <label>Campo personalizado
+                  <select name="field_definition_id" aria-label="Campo personalizado" defaultValue="">
+                    <option value="">Elegí un campo…</option>
+                    {customFields.map((field) => <option key={field.id} value={field.id}>{field.name} · {CUSTOM_FIELD_TYPE_LABELS[field.type] ?? field.type}</option>)}
+                  </select>
+                </label>
+                <button className="ghost-btn" type="submit" disabled={consoleBusy}>Crear enlace</button>
+              </form>
+              {signalBindings.length > 0 ? (
+                <table className="data-table" aria-label="Enlaces señal a campo">
+                  <thead><tr><th>Señal</th><th>Campo</th><th>Acción</th></tr></thead>
+                  <tbody>
+                    {signalBindings.map((binding) => (
+                      <tr key={binding.signal_key}>
+                        <td><strong>{SIGNAL_LABELS[binding.signal_key] ?? binding.signal_key}</strong><br /><span className="mono">{binding.signal_key}</span></td>
+                        <td>{binding.field_name}<br /><span className="mono">{CUSTOM_FIELD_TYPE_LABELS[binding.field_type] ?? binding.field_type}</span></td>
+                        <td>
+                          <button className="ghost-btn danger" disabled={consoleBusy} onClick={() => void runDeleteSignalBinding(binding.signal_key)} aria-label={`Eliminar enlace ${binding.signal_key}`}>Eliminar</button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              ) : (
+                <p className="empty-note">Sin enlaces — el agente no escribe campos personalizados hasta que cada señal tenga su campo.</p>
+              )}
               <h3>Etiquetas</h3>
               <form className="audit-filters" onSubmit={(e) => void submitTagFilter(e)} aria-label="Filtrar contactos por etiqueta">
                 <label>Etiqueta<input name="tag" aria-label="Etiqueta para filtrar" placeholder="vip" defaultValue={tagFilter} /></label>
