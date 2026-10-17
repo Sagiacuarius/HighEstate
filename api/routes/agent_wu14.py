@@ -102,6 +102,7 @@ from api.application.configuration_commands_wu17 import (
     UpdateCustomFieldDefinitionCommand,
 )
 from api.application.conversation_agent import ConversationAgent
+from api.application.kapso_agent_orchestrator import KapsoAgentOrchestrator
 from api.application.crm_commands_wu5 import (
     CrmCommandDenied,
     CrmCommandValidationError,
@@ -117,6 +118,7 @@ from api.application.property_commands_wu11 import RegisterPropertyInterestComma
 from api.domain.agent_draft import AgentDraft
 from api.domain.commercial_crm import FollowUp
 from api.http_contracts import envelope
+from api.inbound_boundary import NormalizedInboundEvent
 from api.routes.simulator_wu9 import CANONICAL_ACCOUNT_SLOT
 from api.tenant_boundary import (
     TenantAccessDenied,
@@ -1916,4 +1918,65 @@ def build_agent_router(conn_kwargs: dict[str, Any], model_provider: Any | None =
             "signal_key": outcome.payload["signal_key"], "deleted": True,
         }, replayed=outcome.replayed)
 
+    async def _kapso_agent_flow(context: Any, event: NormalizedInboundEvent):
+        """Run the same analyze/auto saga as the HTTP route for one conversation."""
+        account_id = context.client_account.id
+        if event.client_account_id != account_id:
+            raise TenantAccessDenied()
+        conversation_id = event.conversation_id
+        contact_id = await conversation_contact(context, runner, conversation_id)
+        if contact_id is None:
+            raise CrmCommandDenied("conversation_not_found_in_scope")
+        lead_id = await lead_for_contact(context, runner, contact_id)
+        settings = await _console_settings_or_default(context, runner)
+        allowed_fields = await _console_allowlist_or_default(context, runner)
+        prompt_text = await _console_prompt_or_default(context, runner)
+        plan = await agent.analyze(
+            context, event.body, contact_id=contact_id, lead_id=lead_id,
+            now=datetime.now(timezone.utc), auto_types=settings.auto_types,
+            calendar_allowed=settings.calendar_allowed,
+            system_prompt=prompt_text, allowed_lead_fields=allowed_fields)
+        outcome = await analyze_cmd.execute_analyze(
+            context, body=event.body, conversation_id=conversation_id,
+            contact_id=contact_id, plan=plan, lead_id=lead_id,
+            message_id=event.message_id, idempotency_key=f"kapso-agent:{event.event_id}")
+        if outcome.replayed:
+            return outcome
+        draft = await drafts.get(context, outcome.payload["resource_id"])
+        if draft is None:
+            raise CrmCommandDenied("draft_not_found_in_scope")
+        draft = await _enrich_draft(runner, account_id, draft)
+        mode_rows = await runner.query(
+            "SELECT agent_mode FROM conversations WHERE id = %s AND client_account_id = %s",
+            (conversation_id, account_id))
+        agent_mode = mode_rows[0]["agent_mode"] if mode_rows else "manual"
+        verdict = (plan.get("policy") or {}).get("verdict")
+        indexed = list(enumerate(draft.proposed_actions))
+        auto_indexed = None
+        if settings.global_auto and agent_mode == "auto" and verdict == "auto":
+            allowed_types = set((plan.get("policy") or {}).get(
+                "auto_execute_types") or [a.type for _, a in indexed])
+            auto_indexed = [(i, a) for i, a in indexed if a.type in allowed_types]
+        elif (settings.global_auto and agent_mode == "auto" and verdict == "escalate"
+              and draft.intent == "handoff"):
+            auto_indexed = [(i, a) for i, a in indexed if a.type in ESCALATION_MECHANICS]
+        if auto_indexed is None:
+            return outcome
+        await decide_cmd.execute_decision(
+            context, draft_id=draft.id, decision="auto",
+            idempotency_key=f"agent-decide:{draft.id}")
+        results = await _dispatch_actions(
+            context=context, draft=draft, indexed=auto_indexed,
+            account_id=account_id, follow_up_cmd=follow_up_cmd,
+            interest_cmd=interest_cmd, create_event_cmd=create_event_cmd,
+            update_event_cmd=update_event_cmd, reply_cmd=reply_cmd,
+            mode_cmd=mode_cmd, transition_cmd=transition_cmd,
+            custom_field_set_cmd=custom_field_set_cmd,
+            allowed_lead_fields=allowed_fields)
+        await finalize_cmd.execute_finalize(
+            context, draft_id=draft.id, execution_result=results,
+            idempotency_key=f"agent-finalize:{draft.id}")
+        return outcome
+
+    router.kapso_orchestrator = KapsoAgentOrchestrator(_kapso_agent_flow)
     return router

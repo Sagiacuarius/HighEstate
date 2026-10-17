@@ -450,6 +450,7 @@ class ProcessInboundMessageCommand(CrmCommandBase):
     def _outbox_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
         return {"resource_id": payload["resource_id"], "event_id": payload["event_id"],
                 "conversation_id": payload["conversation_id"],
+                "message_id": payload["message_id"],
                 "lead_created": payload["lead_created"]}
 
 

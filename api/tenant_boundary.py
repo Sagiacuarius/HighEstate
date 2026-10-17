@@ -87,6 +87,11 @@ class TenantServiceNotConfigured(Exception):
     """No application composition supplied a tenant resolver."""
 
 
+SERVICE_PRINCIPAL_ID = "service:tenant-webhook"
+SERVICE_PRINCIPAL_NAME = "Tenant Webhook Service"
+SERVICE_WRITE_PERMISSIONS = frozenset({"client_account:write"})
+
+
 def get_tenant_resolver(request: Request) -> TenantContextResolver | None:
     """FastAPI dependency; composition, not request data, supplies the resolver."""
     composition = getattr(request.app.state, "tenant_composition", None)
@@ -176,6 +181,35 @@ class TenantContextResolver:
             client_account=account,
             membership=membership,
             correlation_id=getattr(request.state, "correlation_id", ""),
+        )
+
+    async def resolve_service(self, target_client_account_id: str,
+                              correlation_id: str = "") -> TenantContext:
+        """Resolve a trusted provider/service scope without human identity.
+
+        The account mapping is supplied by application configuration, while the
+        account and agency relationship remain authoritative in the tenant
+        repository. No request claims or human membership are consulted.
+        """
+        resolved = await self._tenants.find_account(target_client_account_id)
+        if resolved is None:
+            raise TenantAccessDenied()
+        agency, account = resolved
+        if account.agency_id != agency.id:
+            raise TenantAccessDenied()
+        principal = User(SERVICE_PRINCIPAL_ID, SERVICE_PRINCIPAL_NAME)
+        membership = Membership(
+            user_id=principal.id,
+            agency_id=agency.id,
+            client_account_id=account.id,
+            permissions=SERVICE_WRITE_PERMISSIONS,
+        )
+        return TenantContext(
+            user=principal,
+            agency=agency,
+            client_account=account,
+            membership=membership,
+            correlation_id=correlation_id,
         )
 
     async def switch(

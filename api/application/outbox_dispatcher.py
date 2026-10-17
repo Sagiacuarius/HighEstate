@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Sequence
 
 import psycopg
 from psycopg.rows import dict_row
@@ -17,12 +17,16 @@ class OutboxDispatcher:
         self._repository = repository
         self._consumer = consumer
 
-    async def dispatch_once(self, limit: int = 20, lease_seconds: int = 60) -> int:
+    async def dispatch_once(self, limit: int = 20, lease_seconds: int = 60,
+                            event_types: Sequence[str] | None = None) -> int:
         conn = await psycopg.AsyncConnection.connect(**self._kwargs, autocommit=False, row_factory=dict_row)
         events: list[OutboxEvent] = []
         try:
             async with conn.cursor() as cur:
-                events = await self._repository.claim(limit, lease_seconds, cur)
+                if event_types is None:
+                    events = await self._repository.claim(limit, lease_seconds, cur)
+                else:
+                    events = await self._repository.claim(limit, lease_seconds, cur, event_types)
                 await conn.commit()
             for event in events:
                 try:

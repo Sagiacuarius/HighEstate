@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Protocol
+from typing import Any, Protocol, Sequence
 
 
 @dataclass(frozen=True)
@@ -50,7 +50,8 @@ class AuditSink(AuditRepository, Protocol):
 
 class OutboxRepository(Protocol):
     async def append_outbox(self, event: OutboxEvent, cursor: Any) -> None: ...
-    async def claim(self, limit: int, lease_seconds: int, cursor: Any) -> list[OutboxEvent]: ...
+    async def claim(self, limit: int, lease_seconds: int, cursor: Any,
+                    event_types: Sequence[str] | None = None) -> list[OutboxEvent]: ...
     async def mark_published(self, event_id: str, cursor: Any) -> None: ...
     async def mark_failed(self, event_id: str, available_at: datetime, cursor: Any) -> None: ...
 

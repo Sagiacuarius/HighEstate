@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Sequence
 from uuid import uuid4
 
 from api.application.audit_outbox_ports import AuditRecord, OutboxEvent
@@ -40,13 +40,20 @@ class PostgresAuditOutboxRepository:
              event.idempotency_key, _json(_sanitize(event.payload))),
         )
 
-    async def claim(self, limit: int, lease_seconds: int, cursor: Any) -> list[OutboxEvent]:
+    async def claim(self, limit: int, lease_seconds: int, cursor: Any,
+                    event_types: Sequence[str] | None = None) -> list[OutboxEvent]:
+        event_filter = ""
+        params: list[Any] = [limit, lease_seconds]
+        if event_types is not None:
+            event_filter = " AND event_type = ANY(%s)"
+            params.insert(0, list(event_types))
         await cursor.execute(
-            """
+            f"""
             WITH claimed AS (
               SELECT id FROM outbox_events
-              WHERE (status = 'pending' AND available_at <= now())
-                 OR (status = 'failed' AND available_at <= now())
+              WHERE ((status = 'pending' AND available_at <= now())
+                 OR (status = 'failed' AND available_at <= now()))
+                 {event_filter}
               ORDER BY available_at, created_at, id
               FOR UPDATE SKIP LOCKED
               LIMIT %s
@@ -57,7 +64,7 @@ class PostgresAuditOutboxRepository:
             FROM claimed c WHERE e.id=c.id
             RETURNING e.*
             """,
-            (limit, lease_seconds),
+            tuple(params),
         )
         return [_event(row) for row in await cursor.fetchall()]
 
