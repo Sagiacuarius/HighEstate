@@ -49,6 +49,7 @@ import {
   parseKbArticlesResponse,
   parseKbSelfTestResponse,
   parseLeadFieldsResponse,
+  parseKapsoStatusResponse,
   parseLeadFieldsWriteResponse,
   parsePipelineCreateResponse,
   parsePipelineRenameResponse,
@@ -105,6 +106,7 @@ import {
   type KbSelfTestResponse,
   type LeadFieldsInput,
   type LeadFieldsResponse,
+  type KapsoStatusResponse,
   type LeadFieldsWriteResponse,
   type CreatePipelineInput,
   type CreateStageInput,
@@ -206,6 +208,7 @@ export type DemoApi = {
   getCalendarConfig: (options?: RuntimeHttpCallOptions) => Promise<CalendarConfigResponse>;
   updateCalendarConfig: (body: CalendarConfigInput, options?: RuntimeHttpCallOptions) => Promise<CalendarConfigWriteResponse>;
   getLeadFields: (options?: RuntimeHttpCallOptions) => Promise<LeadFieldsResponse>;
+  kapsoStatus: (options?: RuntimeHttpCallOptions) => Promise<KapsoStatusResponse>;
   updateLeadFields: (body: LeadFieldsInput, options?: RuntimeHttpCallOptions) => Promise<LeadFieldsWriteResponse>;
   /** WU18 signal bindings ("Fuentes del agente"): scope is server-derived, never a client account id. */
   listSignalBindings: (options?: RuntimeHttpCallOptions) => Promise<SignalBindingsResponse>;
@@ -347,6 +350,8 @@ export function createDemoApi(baseUrl: string, fetcher?: DemoApiFetcher): DemoAp
       runtime.put("/v1/demo/agent/calendar-config", body, options ?? {}, parseCalendarConfigWriteResponse),
     getLeadFields: (options) =>
       runtime.get("/v1/demo/agent/lead-fields", options ?? {}, parseLeadFieldsResponse),
+    kapsoStatus: (options) =>
+      runtime.get("/v1/demo/kapso/status", options ?? {}, parseKapsoStatusResponse),
     updateLeadFields: (body, options) =>
       runtime.put("/v1/demo/agent/lead-fields", body, options ?? {}, parseLeadFieldsWriteResponse),
     listSignalBindings: (options) =>

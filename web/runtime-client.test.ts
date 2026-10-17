@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { RuntimeHttpClient, RuntimeHttpError, RuntimeHttpClientError, DemoSelectorClient } from "./runtime-client";
-import { demoQueryCacheKey, parseDemoContextResponse } from "../contracts/runtime-v1";
+import { demoQueryCacheKey, parseDemoContextResponse, parseKapsoStatusResponse } from "../contracts/runtime-v1";
 
 function jsonResponse(body: unknown, status: number, headers: Record<string, string> = {}) {
   return {
@@ -45,6 +45,19 @@ describe("RuntimeHttpClient base URL validation", () => {
 });
 
 describe("RuntimeHttpClient requests", () => {
+  it("reads Kapso status through the typed endpoint", async () => {
+    const payload = { contract_version: "v1", environment: "dev-only-kapso-status", account_id: "a1", correlation_id: "kapso-1", configured: false, webhook_configured: false, phone_numbers: [], outbox: { pending: 0, processing: 0, failed: 0, published_recent: 0 }, last_inbound: null, last_outbound: null, worker: { expected: false, status: "not_observed" } };
+    let path = "";
+    const client = new RuntimeHttpClient({ baseUrl: "http://127.0.0.1:8000", fetcher: async (input) => { path = input; return jsonResponse(payload, 200, { "x-correlation-id": "kapso-1" }); } });
+    const status = await client.get("/v1/demo/kapso/status", {}, parseKapsoStatusResponse);
+    expect(path).toBe("http://127.0.0.1:8000/v1/demo/kapso/status");
+    expect(status.worker.status).toBe("not_observed");
+  });
+
+  it("rejects unknown Kapso status keys", () => {
+    expect(() => parseKapsoStatusResponse({ contract_version: "v1", environment: "dev-only-kapso-status", account_id: "a1", correlation_id: "c", configured: false, webhook_configured: false, phone_numbers: [], outbox: { pending: 0, processing: 0, failed: 0, published_recent: 0 }, last_inbound: null, last_outbound: null, worker: { expected: false, status: "not_observed" }, api_key: "secret" })).toThrow(/Unknown kapso status.api_key/);
+  });
+
   it("propagates correlation and idempotency headers and validates the payload", async () => {
     const seen: Record<string, Record<string, string>> = {};
     const fetcher = async (input: string, init: { headers: Record<string, string> }) => {

@@ -395,6 +395,94 @@ function reqArray(value: unknown, label: string): unknown[] {
   return value;
 }
 
+function rejectUnknown(record: Record<string, unknown>, allowed: readonly string[], label: string): void {
+  for (const key of Object.keys(record)) {
+    if (!allowed.includes(key)) throw new Error(`Unknown ${label}.${key}`);
+  }
+}
+
+export type KapsoUnavailable = { status: "unavailable"; code: "storage_unavailable" };
+export type KapsoActivity = { timestamp: string; status: string } | null | KapsoUnavailable;
+export type KapsoStatusResponse = {
+  contract_version: typeof RUNTIME_CONTRACT_VERSION;
+  environment: "dev-only-kapso-status";
+  account_id: string;
+  correlation_id: CorrelationId;
+  configured: boolean;
+  webhook_configured: boolean;
+  phone_numbers: Array<{ phone_number_id: string; account_configured: boolean }>;
+  outbox: {
+    pending: number;
+    processing: number;
+    failed: number;
+    published_recent: number;
+  } | KapsoUnavailable;
+  last_inbound: KapsoActivity;
+  last_outbound: KapsoActivity;
+  worker: { expected: boolean; status: "not_observed" };
+};
+
+export function parseKapsoStatusResponse(value: unknown): KapsoStatusResponse {
+  const record = reqRecord(value, "kapso status");
+  rejectUnknown(record, ["contract_version", "environment", "account_id", "correlation_id", "configured",
+    "webhook_configured", "phone_numbers", "outbox", "last_inbound", "last_outbound", "worker"], "kapso status");
+  if (record.contract_version !== RUNTIME_CONTRACT_VERSION || record.environment !== "dev-only-kapso-status") {
+    throw new Error("Invalid Kapso status contract");
+  }
+  const correlation = reqStr(record, "correlation_id", "kapso status.correlation_id");
+  correlationId(correlation);
+  const phoneNumbers = reqArray(record.phone_numbers, "kapso status.phone_numbers").map((value) => {
+    const phone = reqRecord(value, "kapso phone number");
+    rejectUnknown(phone, ["phone_number_id", "account_configured"], "kapso phone number");
+    return {
+      phone_number_id: reqStr(phone, "phone_number_id", "kapso phone_number_id"),
+      account_configured: reqBool(phone, "account_configured", "kapso account_configured"),
+    };
+  });
+  const outboxRecord = reqRecord(record.outbox, "kapso status.outbox");
+  let outbox: KapsoStatusResponse["outbox"];
+  if (outboxRecord.status === "unavailable") {
+    rejectUnknown(outboxRecord, ["status", "code"], "kapso status.outbox");
+    if (outboxRecord.code !== "storage_unavailable") throw new Error("Invalid Kapso outbox availability");
+    outbox = { status: "unavailable", code: "storage_unavailable" };
+  } else {
+    rejectUnknown(outboxRecord, ["pending", "processing", "failed", "published_recent"], "kapso status.outbox");
+    outbox = {
+      pending: reqNum(outboxRecord, "pending", "kapso outbox.pending"),
+      processing: reqNum(outboxRecord, "processing", "kapso outbox.processing"),
+      failed: reqNum(outboxRecord, "failed", "kapso outbox.failed"),
+      published_recent: reqNum(outboxRecord, "published_recent", "kapso outbox.published_recent"),
+    };
+  }
+  const activity = (raw: unknown, label: string): KapsoActivity => {
+    if (raw === null) return null;
+    const item = reqRecord(raw, label);
+    if (item.status === "unavailable") {
+      rejectUnknown(item, ["status", "code"], label);
+      if (item.code !== "storage_unavailable") throw new Error(`Invalid ${label} availability`);
+      return { status: "unavailable", code: "storage_unavailable" };
+    }
+    rejectUnknown(item, ["timestamp", "status"], label);
+    return { timestamp: reqStr(item, "timestamp", `${label}.timestamp`), status: reqStr(item, "status", `${label}.status`) };
+  };
+  const worker = reqRecord(record.worker, "kapso status.worker");
+  rejectUnknown(worker, ["expected", "status"], "kapso status.worker");
+  if (worker.status !== "not_observed") throw new Error("Invalid Kapso worker status");
+  return {
+    contract_version: RUNTIME_CONTRACT_VERSION,
+    environment: "dev-only-kapso-status",
+    account_id: reqStr(record, "account_id", "kapso status.account_id"),
+    correlation_id: correlation as CorrelationId,
+    configured: reqBool(record, "configured", "kapso status.configured"),
+    webhook_configured: reqBool(record, "webhook_configured", "kapso status.webhook_configured"),
+    phone_numbers: phoneNumbers,
+    outbox,
+    last_inbound: activity(record.last_inbound, "kapso status.last_inbound"),
+    last_outbound: activity(record.last_outbound, "kapso status.last_outbound"),
+    worker: { expected: reqBool(worker, "expected", "kapso status.worker.expected"), status: "not_observed" },
+  };
+}
+
 function parseCrmReadMeta(value: unknown, label: string): CrmReadMeta {
   const record = reqRecord(value, label);
   const correlation = reqStr(record, "correlation_id", `${label}.correlation_id`);

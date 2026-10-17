@@ -50,12 +50,13 @@ import type {
   CustomFieldType,
   DemoContextResponse,
   KbSelfTestProbe,
+  KapsoStatusResponse,
   SignalBinding,
 } from "../../contracts/runtime-v1";
 
 export const dynamic = "force-dynamic";
 
-type ViewKey = "resumen" | "inbox" | "leads" | "properties" | "pipeline" | "agenda" | "activity" | "auditoria" | "calendario" | "agente";
+type ViewKey = "resumen" | "inbox" | "leads" | "properties" | "pipeline" | "agenda" | "activity" | "auditoria" | "calendario" | "agente" | "configuracion";
 
 type ViewData = {
   dashboard?: import("../../contracts/runtime-v1").CrmDashboardResponse;
@@ -154,6 +155,7 @@ const VIEW_LABELS: Record<ViewKey, string> = {
   auditoria: "Auditoría",
   calendario: "Calendario",
   agente: "Agente",
+  configuracion: "Configuración",
 };
 
 function consoleFailure(error: unknown): string {
@@ -280,6 +282,9 @@ export default function DashboardPage(): React.ReactElement {
   const [propertyBusy, setPropertyBusy] = React.useState(false);
   const [propertyNote, setPropertyNote] = React.useState<string | null>(null);
   const [editingPropertyId, setEditingPropertyId] = React.useState<string | null>(null);
+  const [kapsoStatus, setKapsoStatus] = React.useState<KapsoStatusResponse | null>(null);
+  const [kapsoError, setKapsoError] = React.useState<string | null>(null);
+  const [kapsoLoading, setKapsoLoading] = React.useState(false);
 
   const loadConsole = React.useCallback(async (client: DemoApi): Promise<void> => {
     setConsoleLoading(true);
@@ -325,6 +330,23 @@ export default function DashboardPage(): React.ReactElement {
       setCustomFieldsLoading(false);
     }
   }, []);
+
+  const loadKapsoStatus = React.useCallback(async (client: DemoApi): Promise<void> => {
+    setKapsoLoading(true);
+    setKapsoError(null);
+    try {
+      setKapsoStatus(await client.kapsoStatus());
+    } catch (error) {
+      setKapsoError(consoleFailure(error));
+    } finally {
+      setKapsoLoading(false);
+    }
+  }, []);
+
+  React.useEffect(() => {
+    if (!api || view !== "configuracion") return;
+    void loadKapsoStatus(api);
+  }, [api, view, account?.client_account_id, loadKapsoStatus]);
 
   React.useEffect(() => {
     if (!api || view !== "agente") return;
@@ -1374,6 +1396,31 @@ export default function DashboardPage(): React.ReactElement {
       </section>
     ) : null;
 
+  const renderPropertyRecords = (): React.ReactElement[] => data.properties?.items.map((property, index) => (
+    <div className="property" key={property.property_id}>
+      <div className={`property-image ${index % 2 === 0 ? "image-one" : "image-two"}`}></div>
+      <div><span className="property-type">{property.operation_type === "sale" ? "VENTA" : "ALQUILER"} · {property.location}</span><strong>{property.title}</strong><p>{property.bedrooms} dormitorios · <span className={pillFor(property.availability)}>{statusLabel(property.availability)}</span></p></div>
+      <div><b>{formatMoney(property.price, property.currency)}</b><button className="ghost-btn" type="button" disabled={propertyBusy} onClick={() => setEditingPropertyId(editingPropertyId === property.property_id ? null : property.property_id)}>Editar</button></div>
+      {editingPropertyId === property.property_id ? <form className="property-edit-form" onSubmit={(e) => void submitUpdateProperty(e, property.property_id)}><label>Título<input name="title" defaultValue={property.title} /></label><label>Precio<input name="price_amount" defaultValue={property.price} /></label><label>Dirección<input name="address" defaultValue={property.location} /></label><button className="ghost-btn" disabled={propertyBusy}>Guardar</button></form> : null}
+    </div>
+  )) ?? [];
+
+  const renderPipelineRecords = (withControls: boolean): React.ReactElement[] => data.pipeline?.items.map((pipelineView) => (
+    <div key={pipelineView.pipeline_id}>
+      <p className="eyebrow">{pipelineView.name}</p>
+      {withControls ? <form className="audit-filters" onSubmit={(e) => void submitRenamePipeline(e, pipelineView.pipeline_id)} aria-label={`Renombrar ${pipelineView.name}`}><label>Renombrar embudo<input name="name" defaultValue={pipelineView.name} /></label><button className="ghost-btn" type="submit" disabled={pipelineBusy}>Renombrar</button></form> : null}
+      <div className="pipeline">
+        {pipelineView.stages.map((stage) => <div className="pipeline-col" key={stage.stage_id}>
+          <div className="pipeline-col-head"><span>{stage.name}</span><b>{stage.lead_count}</b></div>
+          {withControls && warnedStageIds.includes(stage.stage_id) ? <span className="status-pill hot">nombre sensible del agente</span> : null}
+          {data.leads?.items.filter((lead) => lead.stage_id === stage.stage_id).map((lead) => <div className="lead-card" key={lead.lead_id}><strong>{lead.contact_name}</strong><small>{statusLabel(lead.status)} · {statusLabel(lead.source)}</small></div>)}
+          {withControls ? <><form className="audit-filters" onSubmit={(e) => void submitRenameStage(e, stage.stage_id)} aria-label={`Renombrar etapa ${stage.name}`}><label>Renombrar etapa<input name="name" defaultValue={stage.name} /></label><button className="ghost-btn" type="submit" disabled={pipelineBusy}>Renombrar</button></form><div className="audit-filters"><button className="ghost-btn" type="button" disabled={pipelineBusy} onClick={() => void runMoveStage(stage.stage_id, "up")} aria-label={`Subir ${stage.name}`}>Subir</button><button className="ghost-btn" type="button" disabled={pipelineBusy} onClick={() => void runMoveStage(stage.stage_id, "down")} aria-label={`Bajar ${stage.name}`}>Bajar</button><button className="ghost-btn danger" type="button" disabled={pipelineBusy} onClick={() => void runDeleteStage(stage.stage_id)}>{confirmDeleteStageId === stage.stage_id ? "Confirmar eliminación" : "Eliminar"}</button></div></> : null}
+        </div>)}
+      </div>
+      {withControls ? <form className="audit-filters" onSubmit={(e) => void submitCreateStage(e, pipelineView.pipeline_id)} aria-label={`Agregar etapa a ${pipelineView.name}`}><label>Nueva etapa<input name="name" placeholder="Nombre de la etapa" /></label><button className="ghost-btn" type="submit" disabled={pipelineBusy}>Agregar etapa</button></form> : null}
+    </div>
+  )) ?? [];
+
   return (
     <div className="app-shell">
       <aside className="sidebar">
@@ -1405,7 +1452,8 @@ export default function DashboardPage(): React.ReactElement {
           {navItem("activity", "↗", "Actividad")}
           {navItem("auditoria", "⌕", "Auditoría")}
           {navItem("calendario", "▦", "Calendario")}
-          {navItem("agente", "◍", "Agente")}
+           {navItem("agente", "◍", "Agente")}
+           {navItem("configuracion", "⚙", "Configuración")}
         </nav>
         <div className="sidebar-bottom">
           <div className="profile">
@@ -1647,6 +1695,39 @@ export default function DashboardPage(): React.ReactElement {
             {data.properties ? (
               <section className="panel">
                 <div className="panel-heading"><div><p className="eyebrow">Catálogo</p><h2>Propiedades · {data.properties.count}</h2></div></div>
+                {data.properties.items.length === 0 ? <p className="empty-note">No hay propiedades creadas.</p> : data.properties.items.map((property) => <div className="property" key={property.property_id}><div><span className="property-type">{property.operation_type === "sale" ? "VENTA" : "ALQUILER"} · {property.location}</span><strong>{property.title}</strong><p>{property.bedrooms} dormitorios · <span className={pillFor(property.availability)}>{statusLabel(property.availability)}</span></p></div><b>{formatMoney(property.price, property.currency)}</b></div>)}
+              </section>
+            ) : null}
+          </section>
+
+          <section className={`view-section${view === "pipeline" ? " is-visible" : ""}`}>
+            {viewError("pipeline")}
+            {data.pipeline && data.leads ? (
+              <section className="panel pipeline-panel">
+                <div className="panel-heading"><div><p className="eyebrow">Embudo comercial</p><h2>Embudo</h2></div></div>
+                {data.pipeline.items.length === 0 ? <p className="empty-note">No hay embudos comerciales creados.</p> : renderPipelineRecords(false)}
+              </section>
+            ) : null}
+          </section>
+
+          {view === "configuracion" ? <section className="view-section is-visible">
+            <section className="panel">
+              <div className="panel-heading"><div><p className="eyebrow">Administración</p><h2>Configuración</h2></div></div>
+              <p className="empty-note">Gestioná únicamente los registros que ya devuelve la cuenta seleccionada.</p>
+              <section aria-labelledby="config-kapso">
+                <div className="panel-heading"><div><p className="eyebrow">Observabilidad · solo lectura</p><h3 id="config-kapso">WhatsApp / Kapso</h3></div><button className="ghost-btn" disabled={kapsoLoading} onClick={() => api && void loadKapsoStatus(api)}>Actualizar</button></div>
+                {kapsoError ? <p className="empty-note"><code>{kapsoError}</code></p> : null}
+                {kapsoLoading && !kapsoStatus ? <p className="empty-note">Cargando estado…</p> : null}
+                {kapsoStatus ? <>
+                  <p className="empty-note">API: <span className={kapsoStatus.configured ? "status-pill ok" : "status-pill bad"}>{kapsoStatus.configured ? "Configurada" : "No configurada"}</span> · Webhook: <span className={kapsoStatus.webhook_configured ? "status-pill ok" : "status-pill bad"}>{kapsoStatus.webhook_configured ? "Configurado" : "No configurado"}</span></p>
+                  <p className="empty-note">Worker: <span className="status-pill hot">{kapsoStatus.worker.status}</span>{kapsoStatus.worker.expected ? " · esperado por configuración" : ""}</p>
+                  <table className="data-table"><thead><tr><th>Teléfono</th><th>Cuenta</th></tr></thead><tbody>{kapsoStatus.phone_numbers.length ? kapsoStatus.phone_numbers.map((phone) => <tr key={phone.phone_number_id}><td className="mono">{phone.phone_number_id}</td><td>{phone.account_configured ? "Configurado" : "No configurado"}</td></tr>) : <tr><td colSpan={2}>Sin teléfonos configurados</td></tr>}</tbody></table>
+                  <p className="empty-note">Cola: {"status" in kapsoStatus.outbox ? "No disponible" : `pendientes ${kapsoStatus.outbox.pending} · procesando ${kapsoStatus.outbox.processing} · fallidos ${kapsoStatus.outbox.failed} · publicados recientes ${kapsoStatus.outbox.published_recent}`}</p>
+                  <p className="empty-note">Último entrante: {kapsoStatus.last_inbound === null ? "Sin actividad" : "code" in kapsoStatus.last_inbound ? "No disponible" : `${kapsoStatus.last_inbound.status} · ${formatTimeUtc(kapsoStatus.last_inbound.timestamp)}`} · Último saliente: {kapsoStatus.last_outbound === null ? "Sin actividad" : "code" in kapsoStatus.last_outbound ? "No disponible" : `${kapsoStatus.last_outbound.status} · ${formatTimeUtc(kapsoStatus.last_outbound.timestamp)}`}</p>
+                </> : null}
+              </section>
+              <section aria-labelledby="config-propiedades">
+                <div className="panel-heading"><div><p className="eyebrow">Catálogo</p><h3 id="config-propiedades">Propiedades</h3></div></div>
                 {propertyNote ? <p className="empty-note"><code>{propertyNote}</code></p> : null}
                 <form className="audit-filters property-form" onSubmit={(e) => void submitCreateProperty(e)} aria-label="Crear propiedad">
                   <label>Título<input name="title" required placeholder="Departamento en Palermo" /></label>
@@ -1660,76 +1741,20 @@ export default function DashboardPage(): React.ReactElement {
                   <label>Sup. cubierta m²<input name="covered_area_m2" type="number" min="0" /></label><label>Sup. total m²<input name="total_area_m2" type="number" min="0" /></label><label>Referencia<input name="reference_code" /></label>
                   <button className="ghost-btn" type="submit" disabled={propertyBusy}>Crear propiedad</button>
                 </form>
-                {data.properties.items.map((property, index) => (
-                  <div className="property" key={property.property_id}>
-                    <div className={`property-image ${index % 2 === 0 ? "image-one" : "image-two"}`}></div>
-                    <div>
-                      <span className="property-type">{property.operation_type === "sale" ? "VENTA" : "ALQUILER"} · {property.location}</span>
-                      <strong>{property.title}</strong>
-                      <p>{property.bedrooms} dormitorios · <span className={pillFor(property.availability)}>{statusLabel(property.availability)}</span></p>
-                    </div>
-                    <div><b>{formatMoney(property.price, property.currency)}</b><button className="ghost-btn" type="button" disabled={propertyBusy} onClick={() => setEditingPropertyId(editingPropertyId === property.property_id ? null : property.property_id)}>Editar</button></div>
-                    {editingPropertyId === property.property_id ? <form className="property-edit-form" onSubmit={(e) => void submitUpdateProperty(e, property.property_id)}><label>Título<input name="title" defaultValue={property.title} /></label><label>Precio<input name="price_amount" defaultValue={property.price} /></label><label>Dirección<input name="address" defaultValue={property.location} /></label><button className="ghost-btn" disabled={propertyBusy}>Guardar</button></form> : null}
-                  </div>
-                ))}
+                {data.properties?.items.length ? renderPropertyRecords() : <p className="empty-note">No hay propiedades creadas.</p>}
               </section>
-            ) : null}
-          </section>
-
-          <section className={`view-section${view === "pipeline" ? " is-visible" : ""}`}>
-            {viewError("pipeline")}
-            {data.pipeline && data.leads ? (
-              <section className="panel pipeline-panel">
-                <div className="panel-heading"><div><p className="eyebrow">Embudo comercial</p><h2>Embudo</h2></div></div>
+              <section className="pipeline-panel" aria-labelledby="config-embudos">
+                <div className="panel-heading"><div><p className="eyebrow">Proceso comercial</p><h3 id="config-embudos">Embudos comerciales</h3></div></div>
                 {pipelineNote ? <p className="empty-note">{pipelineNote}</p> : null}
                 <form className="audit-filters" onSubmit={(e) => void submitCreatePipeline(e)} aria-label="Crear embudo">
                   <label>Nombre del embudo<input name="name" placeholder="Nuevo embudo" /></label>
                   <label>Etapas iniciales (separadas por comas)<input name="stages" placeholder="Nuevo, Calificado, Visita" /></label>
                   <button className="ghost-btn" type="submit" disabled={pipelineBusy}>Crear embudo</button>
                 </form>
-                {data.pipeline.items.map((pipelineView) => (
-                  <div key={pipelineView.pipeline_id}>
-                    <p className="eyebrow">{pipelineView.name}</p>
-                    <form className="audit-filters" onSubmit={(e) => void submitRenamePipeline(e, pipelineView.pipeline_id)} aria-label={`Renombrar ${pipelineView.name}`}>
-                      <label>Renombrar embudo<input name="name" defaultValue={pipelineView.name} /></label>
-                      <button className="ghost-btn" type="submit" disabled={pipelineBusy}>Renombrar</button>
-                    </form>
-                    <div className="pipeline">
-                      {pipelineView.stages.map((stage) => (
-                        <div className="pipeline-col" key={stage.stage_id}>
-                          <div className="pipeline-col-head"><span>{stage.name}</span><b>{stage.lead_count}</b></div>
-                          {warnedStageIds.includes(stage.stage_id) ? (
-                            <span className="status-pill hot">nombre sensible del agente</span>
-                          ) : null}
-                          {data.leads?.items.filter((lead) => lead.stage_id === stage.stage_id).map((lead) => (
-                            <div className="lead-card" key={lead.lead_id}>
-                              <strong>{lead.contact_name}</strong>
-                              <small>{statusLabel(lead.status)} · {statusLabel(lead.source)}</small>
-                            </div>
-                          ))}
-                          <form className="audit-filters" onSubmit={(e) => void submitRenameStage(e, stage.stage_id)} aria-label={`Renombrar etapa ${stage.name}`}>
-                            <label>Renombrar etapa<input name="name" defaultValue={stage.name} /></label>
-                            <button className="ghost-btn" type="submit" disabled={pipelineBusy}>Renombrar</button>
-                          </form>
-                          <div className="audit-filters">
-                            <button className="ghost-btn" type="button" disabled={pipelineBusy} onClick={() => void runMoveStage(stage.stage_id, "up")} aria-label={`Subir ${stage.name}`}>Subir</button>
-                            <button className="ghost-btn" type="button" disabled={pipelineBusy} onClick={() => void runMoveStage(stage.stage_id, "down")} aria-label={`Bajar ${stage.name}`}>Bajar</button>
-                            <button className="ghost-btn danger" type="button" disabled={pipelineBusy} onClick={() => void runDeleteStage(stage.stage_id)}>
-                              {confirmDeleteStageId === stage.stage_id ? "Confirmar eliminación" : "Eliminar"}
-                            </button>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                    <form className="audit-filters" onSubmit={(e) => void submitCreateStage(e, pipelineView.pipeline_id)} aria-label={`Agregar etapa a ${pipelineView.name}`}>
-                      <label>Nueva etapa<input name="name" placeholder="Nombre de la etapa" /></label>
-                      <button className="ghost-btn" type="submit" disabled={pipelineBusy}>Agregar etapa</button>
-                    </form>
-                  </div>
-                ))}
+                {data.pipeline?.items.length ? renderPipelineRecords(true) : <p className="empty-note">No hay embudos comerciales creados.</p>}
               </section>
-            ) : null}
-          </section>
+            </section>
+          </section> : null}
 
           <section className={`view-section${view === "agenda" ? " is-visible" : ""}`}>
             {viewError("agenda")}

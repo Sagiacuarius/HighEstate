@@ -824,9 +824,9 @@ describe("WU19 Embudo: pipelines y etapas", () => {
 
   async function openEmbudo(): Promise<void> {
     await waitFor(() => {
-      if (!document.querySelector('.main-nav a[href="#pipeline"]')) throw new Error("nav not ready");
+      if (!document.querySelector('.main-nav a[href="#configuracion"]')) throw new Error("nav not ready");
     });
-    fireEvent.click(document.querySelector('.main-nav a[href="#pipeline"]') as HTMLElement);
+    fireEvent.click(document.querySelector('.main-nav a[href="#configuracion"]') as HTMLElement);
     await screen.findByText("Embudo comercial");
   }
 
@@ -901,7 +901,7 @@ describe("WU19 Embudo: pipelines y etapas", () => {
       expect(JSON.stringify(puts[0].body)).not.toMatch(/client_account_id/);
     });
     expect(await screen.findByText(/el nombre coincide con una etapa usada por el agente/)).toBeTruthy();
-    expect(screen.getByText("nombre sensible del agente")).toBeTruthy();
+    expect(await screen.findAllByText("nombre sensible del agente")).toHaveLength(1);
   });
 
   it("move up/down posts direction and handles the already-at-edge message", async () => {

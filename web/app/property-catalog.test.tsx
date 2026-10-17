@@ -27,6 +27,7 @@ beforeEach(() => {
     if (path === "/v1/demo/pipeline") return response({ ...meta, items: [], count: 0 });
     if (path === "/v1/demo/agenda") return response({ ...meta, counts: { pending: 0, overdue: 0, due_today: 0, completed: 0 }, items: [] });
     if (path === "/v1/demo/activity") return response({ ...meta, total: 0, limit: 20, items: [] });
+    if (path === "/v1/demo/kapso/status") return response({ contract_version: "v1", environment: "dev-only-kapso-status", account_id: "a1", correlation_id: "c1", configured: true, webhook_configured: true, phone_numbers: [{ phone_number_id: "phone-1", account_configured: true }], outbox: { pending: 2, processing: 1, failed: 0, published_recent: 4 }, last_inbound: { timestamp: "2026-09-14T12:00:00.000Z", status: "persisted" }, last_outbound: null, worker: { expected: true, status: "not_observed" } });
     if (propertyFailure && path === "/v1/demo/properties" && init?.method === "POST") return response({ error: { code: "invalid_command", message: "invalid property", correlation_id: "c1" } }, 400);
     if (init?.method === "POST" || init?.method === "PUT") return response({ contract_version: "v1", environment: "dev-only-property-catalog", accepted: true, replayed: false, correlation_id: "c1", result: { resource_id: "p1", correlation_id: "c1" } });
     return response({ error: { code: "route_not_found", message: "missing", correlation_id: "c1" } }, 404);
@@ -42,9 +43,26 @@ async function openProperties() {
   await screen.findByText("Propiedades · 1");
 }
 
-describe("current property catalog controls", () => {
-  it("creates a property and refreshes the catalog", async () => {
+async function openConfiguration() {
+  const { default: Page } = await import("./page");
+  render(React.createElement(Page));
+  await waitFor(() => expect(document.querySelector('a[href="#configuracion"]')).toBeTruthy());
+  fireEvent.click(document.querySelector('a[href="#configuracion"]') as HTMLElement);
+  await screen.findByRole("heading", { name: "Configuración" });
+}
+
+describe("property administration visibility", () => {
+  it("keeps administration controls out of the operational catalog", async () => {
     await openProperties();
+    expect(screen.queryByRole("button", { name: "Crear propiedad" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Editar" })).toBeNull();
+    fireEvent.click(screen.getByRole("link", { name: /Embudo/ }));
+    await screen.findAllByText("No hay embudos comerciales creados.");
+    expect(screen.queryByRole("button", { name: "Crear embudo" })).toBeNull();
+  });
+
+  it("creates a property and refreshes the catalog", async () => {
+    await openConfiguration();
     fireEvent.change(screen.getByLabelText("Título"), { target: { value: "Casa Nueva" } });
     fireEvent.change(screen.getByLabelText("Precio"), { target: { value: "200000" } });
     fireEvent.click(screen.getByRole("button", { name: "Crear propiedad" }));
@@ -52,8 +70,18 @@ describe("current property catalog controls", () => {
     expect(calls.some((call) => call.path === "/v1/demo/properties" && call.method === "POST")).toBe(true);
   });
 
+  it("renders read-only Kapso status without credential fields or values", async () => {
+    await openConfiguration();
+    expect(screen.getByRole("heading", { name: "WhatsApp / Kapso" })).toBeTruthy();
+    expect(screen.getByText("phone-1")).toBeTruthy();
+    expect(screen.getByText(/pendientes 2/)).toBeTruthy();
+    expect(screen.getByText("not_observed")).toBeTruthy();
+    expect(screen.queryByLabelText(/API key|webhook secret|secreto/i)).toBeNull();
+    expect(screen.queryByDisplayValue(/secret|token|api[_ -]?key/i)).toBeNull();
+  });
+
   it("opens edit and sends PUT, while API errors show code and correlation", async () => {
-    await openProperties();
+    await openConfiguration();
     fireEvent.click(screen.getByRole("button", { name: "Editar" }));
     fireEvent.change(screen.getByDisplayValue("Casa Norte"), { target: { value: "Casa Editada" } });
     fireEvent.click(screen.getByRole("button", { name: "Guardar" }));
@@ -63,7 +91,7 @@ describe("current property catalog controls", () => {
 
   it("shows the API envelope and correlation on create failure", async () => {
     propertyFailure = true;
-    await openProperties();
+    await openConfiguration();
     fireEvent.change(screen.getByLabelText("Título"), { target: { value: "Casa Fallida" } });
     fireEvent.change(screen.getByLabelText("Precio"), { target: { value: "1" } });
     fireEvent.click(screen.getByRole("button", { name: "Crear propiedad" }));
